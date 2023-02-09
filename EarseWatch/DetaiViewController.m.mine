@@ -1,0 +1,3729 @@
+//
+//  DetaiViewController.m
+//  EarseWatch
+//
+//  Created by Greystone on 12/20/21.
+//  Copyright © 2021 Greystone. All rights reserved.
+//
+#define MAX_ULONG 4294967295
+#define NSLog(FORMAT, ...) printf("%s\n", [[NSString stringWithFormat:FORMAT, ##__VA_ARGS__] UTF8String]);
+
+#import "DetaiViewController.h"
+#import "AppDelegate.h"
+#import "ViewController.h"
+#import "CellTableClass.h"
+#import "UITextFieldCell.h"
+#import "DeviceInfomation.h"
+#import "PrinterSetting.h"
+
+#import "LibUSB/ProccessUSB.h"
+#import "ProtocolHW.h"
+#import "UIButton.h"
+#import <Realm/Realm.h>
+#import "DeviceInfo.h"
+#import "AFNetworking.h"
+#import <CommonCrypto/CommonCrypto.h>
+#import "DatabaseCom.h"
+#import <SSZipArchive.h>
+#import "FTPKit/FTPKit.h"
+#include "DeviceMapping.h"
+#include "LinkServer.h"
+
+@interface DetaiViewController ()
+
+@end
+
+@implementation DetaiViewController
+@synthesize libusb;
+@synthesize tableView;
+@synthesize printSetting;
+@synthesize windowController;
+@synthesize txtItemID;
+@synthesize lbPleaseScanItemID;
+NSTextField *lbConnectGCSLabel;
+
+NSString* stringVlItemIDTemp = @"";
+NSString* stationSN = @"";
+NSString* userName = @"";
+
+NSString* linkServer = @"http://pushing3.greystonedatatech.com/";
+NSMutableArray *arrPushingListMain;
+
+
+NSString* colorDevice = @"N/A";
+NSString* capacityDevice = @"N/A";
+NSString* carrierDevice = @"N/A";
+
+
+- (void)loadView
+{
+    libusb = nil;
+    NSRect rect = [NSScreen mainScreen].frame;
+    self.view = [[NSView alloc] initWithFrame:rect];
+    self.view.wantsLayer = YES;
+    self.view.layer.backgroundColor = [NSColor redColor].CGColor;
+    self.view.appearance = [NSAppearance appearanceNamed:NSAppearanceNameVibrantLight];
+}
+- (void)btLogoutClick:(id)sender
+{
+    NSLog(@"%s",__func__);
+    
+    [self.view.window toggleFullScreen:Nil];
+    [self.view.window toggleToolbarShown:Nil];
+    if(timerCheckDevice)
+    {
+        [timerCheckDevice invalidate];
+        timerCheckDevice = nil;
+    }
+    AppDelegate *delegate = (AppDelegate *)[[NSApplication sharedApplication] delegate];
+    [delegate logout];
+    
+}
+int countToStartThread = 0;
+- (void)viewDidLoad {
+    
+    [super viewDidLoad];
+    NSLog(@"%s viewDidLoad ======>",__func__);
+    
+    // Do view setup here.
+    //arrCell = [[NSMutableArray alloc] init];
+   
+    [self.view.window toggleFullScreen:self];
+    [self.view.window toggleToolbarShown:self];
+    [NSApplication sharedApplication].presentationOptions  = NSApplicationPresentationAutoHideDock|NSApplicationPresentationAutoHideMenuBar|NSApplicationPresentationAutoHideToolbar;
+    numRow = 0;
+    numCol = 0;
+   
+    xoaManual = YES;// lay tu web
+    dicInforconfig = [[self getConfig] mutableCopy];
+    
+    [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(boadrBTClick:) name:@"BoardButtonsClick" object:nil];
+    AppDelegate *delegate = (AppDelegate *)[[NSApplication sharedApplication] delegate];
+    delegate.isLogout = NO;
+    appDelegate = delegate;
+    stationSN = delegate.mMacAddress;
+    userName = delegate.userName;
+    arrPushingListMain = delegate.arrPushingListDelegate;
+    NSLog(@"%s viewDidLoad ======> MAC Adress (stationSN): %@", __func__, stationSN);
+    NSLog(@"%s viewDidLoad ======> arrPushingListMain: %@", __func__, arrPushingListMain);
+
+    int hv = 50;
+    NSRect rect = [NSScreen mainScreen].frame;
+    [self drawFooter:NSMakeRect(0, 0, rect.size.width, hv)];
+    [self drawHeader:NSMakeRect(0, rect.size.height - hv, rect.size.width, hv)];
+    [self drawConten:NSMakeRect(0, hv, rect.size.width, rect.size.height - 2*hv)];
+//    { "apps_version" : "3.57", "checksum" : 0, "command" : 2, "firmware" : "2.2a;", "hardware" : "1.0c;", "key" : 1152, "machine_type":"iwatch_eraser","manual_update" : "", "modelsystem" : 1, "prversion" : 4, "software" : "STR.A16.88", "stationsn" : "10C37B9DC6DE", "status" : 0 }
+    [self copyFileLib];
+    checkInfoFlag = 0;
+}
+
+- (void)viewWillAppear
+{
+    [super viewWillAppear];
+    txtItemID.editable = YES;
+   
+}
+
+- (void)viewDidAppear
+{
+    [super viewWillAppear];
+  
+    NSWindow *wd = [txtItemID window];
+    [wd makeFirstResponder:txtItemID];
+    
+    
+    for (int i = 0; i < arrayBoard.count; i++)
+    {
+        NSMutableDictionary *dic = (NSMutableDictionary *)arrayBoard[i];
+        ProtocolHW *pro = [[ProtocolHW alloc] init];
+        NSString *UniqueDeviceID = [dic objectForKey:@"UniqueDeviceID"];
+        NSDictionary *version = [pro checkVersion:UniqueDeviceID];
+        if(version==nil)
+        {
+            [pro closeSerialPort];
+            version = [pro checkVersion:UniqueDeviceID];
+        }
+        
+        if(version!=nil)
+        {
+            //version = [NSDictionary dictionary];
+            [dic setObject:version forKey:@"VersionHW"];
+        }
+        
+        
+        Byte arr[8]= {LED_OFF, LED_OFF, LED_OFF, LED_OFF, LED_OFF,LED_OFF,LED_OFF,LED_OFF};
+        [pro ledControl:UniqueDeviceID ledArr:arr];
+
+        // start get event button on board
+        NSThread *myThread = [[NSThread alloc] initWithTarget:pro selector:@selector(startCheckButton:) object:UniqueDeviceID];
+        [myThread start];
+        [dic setObject:pro forKey:@"ProtocolHW"];
+        [arrayBoard replaceObjectAtIndex:i withObject:dic];
+    }
+    
+    // search idevice,gan info to database 3s
+    countToStartThread = countToStartThread + 1;
+    myThread = [[NSThread alloc] initWithTarget:self selector:@selector(runUpdate) object:nil];
+    [myThread start];
+
+    threadCheckDownloadSW_FW = [[NSThread alloc] initWithTarget:self selector:@selector(runCheckDownloadSW_FW) object:nil];
+    [threadCheckDownloadSW_FW start];
+
+    threadDownloadSW_FW = [[NSThread alloc] initWithTarget:self selector:@selector(runDownloadSW_FW) object:nil];
+    [threadDownloadSW_FW start];
+    
+}
+
+- (void)copyFileLib
+{
+    AppDelegate *delegatedir = (AppDelegate *)[[NSApplication sharedApplication] delegate];
+    NSString *pathLib = [delegatedir pathLib];
+    NSString *source = [NSString stringWithFormat:@"%@/idevicerestore/src/idevicerestore",pathLib];//URL(string: "file:///Users/xxx/Desktop/Media/")!
+    NSString *sourceInfo = [NSString stringWithFormat:@"%@/libimobiledevice/tools/ideviceinfo",pathLib];
+    
+    if([[NSFileManager defaultManager] fileExistsAtPath:source]==NO)
+    {
+        NSLog(@"%s khong co file source: %@",__func__,source);
+        return;
+    }
+    NSString *destination;
+    NSString *desInfo;
+    NSError *err;
+    source = [NSString stringWithFormat:@"file://%@",source];
+    sourceInfo = [NSString stringWithFormat:@"file://%@",sourceInfo];
+    for(int i=0;i<=arrDatabaseCell.count;i++)
+    {
+        err = nil;
+        destination = [NSString stringWithFormat:@"%@%d",source,i];
+        desInfo = [NSString stringWithFormat:@"%@%d",sourceInfo,i];
+        NSLog(@"%s copy file: %@",__func__,destination);
+        
+        [[NSFileManager defaultManager] copyItemAtURL:[NSURL URLWithString:source] toURL:[NSURL URLWithString:destination] error:&err];
+        NSLog(@"%s coppy file: %@",__func__,desInfo);
+        [[NSFileManager defaultManager] copyItemAtURL:[NSURL URLWithString:sourceInfo] toURL:[NSURL URLWithString:desInfo] error:&err];
+
+    }
+    
+}
+//- (void)runTime:(NSTimer *)timer
+//{
+//    countTime++;
+//    if(countTime >= MAX_ULONG)
+//        countTime = 0;
+//
+//}
+
+
+- (void)createDir :(NSString *)dirName
+{
+    
+    NSArray *paths = NSSearchPathForDirectoriesInDomains (NSDocumentDirectory, NSUserDomainMask, YES);
+    NSString *documentPath = [paths objectAtIndex:0];
+    NSString *temp = [NSString stringWithFormat: @"%@%@", @"/EarseWatch/", dirName];
+    NSFileManager *fm = [NSFileManager defaultManager];
+
+    NSURL* pathSaveSW = [[[fm URLsForDirectory:NSDocumentDirectory
+                               inDomains:NSUserDomainMask] objectAtIndex:0]
+                                     URLByAppendingPathComponent:temp];
+    if(![fm fileExistsAtPath:[pathSaveSW path]]){
+        NSLog(@"[createDirForImage] dir doesn't exists");
+        NSError *error;
+        if (![[NSFileManager defaultManager] fileExistsAtPath:pathSaveSW.path])
+        {
+            if (![[NSFileManager defaultManager] createDirectoryAtPath:pathSaveSW.path
+                                           withIntermediateDirectories:NO
+                                                            attributes:nil
+                                                                 error:&error])
+            {
+                NSLog(@"[createDirForImage] Create directory error: %@", error);
+            }
+        }
+    } else {
+        NSLog(@"[createDirForImage] dir exists");
+    }
+}
+
+
+
+- (NSString *)runCommand:(NSString *)commandToRun
+{
+    NSTask *task = [[NSTask alloc] init];
+    [task setLaunchPath:@"/bin/sh"];
+
+    NSArray *arguments = [NSArray arrayWithObjects:
+                          @"-c" ,
+                          [NSString stringWithFormat:@"%@", commandToRun],
+                          nil];
+    NSLog(@"run command:%@", commandToRun);
+    [task setArguments:arguments];
+
+    NSPipe *pipe = [NSPipe pipe];
+    [task setStandardOutput:pipe];
+
+    NSFileHandle *file = [pipe fileHandleForReading];
+
+    [task launch];
+
+    NSData *data = [file readDataToEndOfFile];
+
+    NSString *output = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
+    return output;
+}
+
+BOOL isDownloadingSW = FALSE;
+BOOL isDownloadedSW = FALSE;
+BOOL isUnzippedSW = FALSE;
+
+BOOL isDownloadingFW = FALSE;
+BOOL isDownloadedFW = FALSE;
+BOOL isUnzippedFW = FALSE;
+
+BOOL isDownloadingSQLMapping = FALSE;
+BOOL isDownloadedSQLMapping = FALSE;
+
+
+NSString *fileNameZip = @"sample-zip-file.zip";
+NSString *versionSW_DownloadSW = @"";
+NSString *versionSW_DownloadFW = @"";
+
+NSMutableArray *arrVersionFW;
+
+- (void) runDownloadSW_FW
+{
+    
+    [self createDir: @"NewSoftware"];
+    //NSString *output = [self runCommand: @"rm -R /Users/tringuyen/Documents/EarseWatch/NewSoftware/*"];
+    //NSLog(@"\nrunDownloadSW_FW remove all files in NewSoftware: %@: ", output);
+
+    NSArray *paths = NSSearchPathForDirectoriesInDomains (NSDocumentDirectory, NSUserDomainMask, YES);
+    NSString *documentPath = [paths objectAtIndex:0];
+    NSString *downloadFolderPath = [NSString stringWithFormat: @"file://%@%@", documentPath, @"/EarseWatch/NewSoftware/"];
+    NSURL *urlDownloadFolderPath = [NSURL URLWithString:downloadFolderPath];
+    
+    while (TRUE)
+    {
+        if (isDownloadingSQLMapping)
+        {
+            isDownloadingSQLMapping = FALSE;
+            
+            //FTPClient *ftp = [FTPClient clientWithHost:@"cloud.greystonedatatech.com" port:21 username:@"ftpupload" password:@"123Qwe!@#"];
+            
+            FTPClient *ftp = [FTPClient clientWithHost:ftpServer port:ftpPort username:ftpUsername password:ftpPassword];
+
+           // [ftp directoryExistsAtPath:@"/Mini-ZeroIT/Setting" success:^(BOOL exists) {
+
+            [ftp directoryExistsAtPath:ftpServerPath success:^(BOOL exists) {
+                if (exists) {
+                    NSLog(@"[FTP] Success: 000");
+                } else {
+                    NSLog(@"[FTP] Error: Root path '/' must exist");
+                }
+            } failure:^(NSError *error) {
+                NSLog(@"[FTP] Error: %@", error.localizedDescription);
+            }];
+            
+            NSString *downloadSQLFolderPath = [NSString stringWithFormat: @"%@%@", documentPath, @"/EarseWatch/NewSoftware/gds_mobile_table_carrier.sql"];
+            NSLog(@"[FTP] downloadSQLFolderPath: %@", downloadSQLFolderPath);
+
+            [ftp downloadFile:@"/Mini-ZeroIT/Setting/gds_mobile_table_carrier.sql" to: downloadSQLFolderPath progress: nil success:^(void) {
+                NSLog(@"[FTP] Success download SQL file");
+                    NSString *fileContents = [NSString stringWithContentsOfFile:downloadSQLFolderPath];
+                    NSArray *lines = [fileContents componentsSeparatedByString:@"\n"];
+                    NSLog(@"lines: %lu", (unsigned long)lines.count);
+                
+                    // Persist your data easily
+                    NSError *error = nil;
+//                    RLMRealmConfiguration *config = [RLMRealmConfiguration defaultConfiguration];
+//                    RLMRealm *realm = [RLMRealm realmWithConfiguration:config error:&error];
+//                    if (!realm) {
+//                        // handle error
+//                    }
+                    RLMRealm *realm = [RLMRealm defaultRealm];
+
+                    //for(int i = 14; i < lines.count - 1; i++) {
+                
+                    for(int i = 14; i < lines.count - 1; i++) {
+                
+                        NSString *myLine = lines[i];
+                
+                        myLine = [myLine stringByReplacingOccurrencesOfString:@"INSERT INTO `gds_mobile_table_carrier` VALUES (" withString:@""];
+                        myLine = [myLine stringByReplacingOccurrencesOfString:@");" withString:@""];
+                        myLine = [myLine stringByReplacingOccurrencesOfString:@"'" withString:@""];
+
+                        NSLog(@"[FTP][SQL] myLine: %@", myLine);
+                
+                        NSArray *arrayOfComponents = [myLine componentsSeparatedByString:@","];
+                
+                        if ([arrayOfComponents[2] rangeOfString:@"Apple Watch"].location == NSNotFound) {
+                          NSLog(@"[FTP][SQL] string does not contain Apple Watch");
+                        } else {
+                          NSLog(@"[FTP][SQL] string contains Apple Watch!");
+                            if ([arrayOfComponents[2] rangeOfString:@"Apple Watch"].location != 0) {
+                                [realm beginWriteTransaction];
+                
+                                DeviceMapping *deviceMapping = [[DeviceMapping alloc] init];
+                                deviceMapping.noID = arrayOfComponents[0];
+                                deviceMapping.icapture_pn = arrayOfComponents[1];
+                                deviceMapping.product_name = arrayOfComponents[2];
+                                deviceMapping.capacity = arrayOfComponents[3];
+                                deviceMapping.color = arrayOfComponents[4];
+                                deviceMapping.carrier = arrayOfComponents[5];
+                                deviceMapping.country = arrayOfComponents[6];
+                                deviceMapping.region_code = arrayOfComponents[7];
+                                deviceMapping.external_model = arrayOfComponents[8];
+                                NSUUID *UUID = [[NSUUID alloc] init];
+                                NSString *id = [UUID UUIDString];
+                                deviceMapping.ID = id;
+                
+                                NSLog(@"[FTP][SQL] deviceMapping.noID: %@", deviceMapping.noID);
+                                NSLog(@"[FTP][SQL] deviceMapping.icapture_pn: %@",  deviceMapping.icapture_pn);
+                                NSLog(@"[FTP][SQL] deviceMapping.product_name: %@",  deviceMapping.product_name);
+                                NSLog(@"[FTP][SQL] deviceMapping.capacity: %@", deviceMapping.capacity);
+                                NSLog(@"[FTP][SQL] deviceMapping.color: %@", deviceMapping.color);
+                                NSLog(@"[FTP][SQL] deviceMapping.carrier: %@", deviceMapping.carrier);
+                                NSLog(@"[FTP][SQL] deviceMapping.country: %@", deviceMapping.country);
+                                NSLog(@"[FTP][SQL] deviceMapping.region_code: %@", deviceMapping.region_code);
+                                NSLog(@"[FTP][SQL] external_model.external_model: %@", deviceMapping.external_model);
+                                NSLog(@"[FTP][SQL] deviceMapping.ID: %@", deviceMapping.ID);
+                                
+                                [realm addOrUpdateObject:deviceMapping];
+                                [realm commitWriteTransaction];
+                            }
+                            
+                        }
+                    }
+                
+                NSLog(@"[FTP][SQL] deviceMapping update database DONE!!!");
+                sendDeviceMappingVerify = TRUE;
+                
+            } failure:^(NSError *error) {
+                NSLog(@"[FTP] Error: %@", error.localizedDescription);
+            }];
+
+        }
+        
+        if (isDownloadingFW)
+        {
+            isDownloadingFW = FALSE;
+            NSURLSessionConfiguration *configuration = [NSURLSessionConfiguration defaultSessionConfiguration];
+            AFURLSessionManager *manager = [[AFURLSessionManager alloc] initWithSessionConfiguration:configuration];
+
+            //https://b011086fa2a305b25393-d9a427afbab97d13dae330d7e969a9b9.ssl.cf1.rackcdn.com/Firmware/5.12/FW_VERSION.tar.gz
+            NSString *linkDownloadFWTemp = @"https://b011086fa2a305b25393-d9a427afbab97d13dae330d7e969a9b9.ssl.cf1.rackcdn.com/Firmware/";
+            NSString *linkDownloadFW = [NSString stringWithFormat:@"%@/%@/%@", linkDownloadFWTemp, versionSW_DownloadFW, @"/FW_VERSION.tar.gz"];
+            NSLog(@"linkDownloadFW [Firmware]: %@", linkDownloadFW);
+
+//            linkDownloadFW = @"https://www.sample-videos.com/zip/50mb.zip";
+            NSURL *URL = [NSURL URLWithString:linkDownloadFW];
+            NSURLRequest *request = [NSURLRequest requestWithURL:URL];
+            
+            NSLog(@"[runDownloadSW_FW] [Firmware] urlDownloadFolderPath 1: %@", urlDownloadFolderPath);
+
+            NSURLSessionDownloadTask *downloadTask = [manager downloadTaskWithRequest:request progress:^(NSProgress * _Nonnull downloadProgress)
+            {
+                NSLog(@"[runDownloadSW_FW] [Firmware] Progress: %f", downloadProgress.fractionCompleted*100);
+                
+                int percentage = [[NSNumber numberWithFloat:downloadProgress.fractionCompleted*100] intValue];
+
+                NSString *downloadStatus = [NSString stringWithFormat:@"Downloading the new firmware %d%@", percentage, @"%"];
+                dispatch_async(dispatch_get_main_queue(), ^{
+                    lbConnectGCSLabel.stringValue = downloadStatus;
+                    lbConnectGCSLabel.textColor = NSColor.redColor;
+                });
+               
+            } destination:^NSURL *(NSURL *targetPath, NSURLResponse *response) {
+                //NSURL *documentsDirectoryURL = [[NSFileManager defaultManager] URLForDirectory:NSDocumentDirectory inDomain:NSUserDomainMask appropriateForURL:nil create:NO error:nil];
+                return [urlDownloadFolderPath URLByAppendingPathComponent:[response suggestedFilename]];
+            } completionHandler:^(NSURLResponse *response, NSURL *filePath, NSError *error)
+            {
+                NSLog(@"[runDownloadSW_FW] [Firmware] [response suggestedFilename]: %@", [response suggestedFilename]);
+                fileNameZip = [response suggestedFilename];
+                NSLog(@"[runDownloadSW_FW] [Firmware] File downloaded to: %@", filePath);
+                isDownloadedFW = TRUE;
+            }];
+            [downloadTask resume];
+        }
+        
+        if (isDownloadedFW)
+        {
+            if(!isUnzippedFW)
+            {
+                NSString *downloadFolderPath = [NSString stringWithFormat: @"%@%@", documentPath, @"/EarseWatch/NewSoftware/"];
+                NSString *fileZipPath = [NSString stringWithFormat: @"%@%@", downloadFolderPath, fileNameZip];
+
+                if ([SSZipArchive unzipFileAtPath: fileZipPath toDestination: urlDownloadFolderPath.path]) {
+                    NSLog(@"\nrunDownloadSW_FW [Firmware] Unzip successfully");
+                    isUnzippedFW = TRUE;
+                    //runCommand(@"cp -R /Users/tringuyen/Documents/EarseWatch/NewSoftware/emac_client.app /Users/tringuyen/Documents/EarseWatch");
+                    
+                    NSString *source = [NSString stringWithFormat: @"%@%@", documentPath, @"/EarseWatch/NewSoftware/EarseWatch.app"];
+                    NSString *destination = [NSString stringWithFormat: @"%@%@", documentPath, @"/EarseWatch/"];
+                    NSString *strCommmandCopy = [NSString stringWithFormat: @"cp -Rf %@ %@", source, destination];
+                    NSLog(@"\nrunDownloadSW_FW [Firmware] strCommmandCopy: %@ ", strCommmandCopy);
+
+                    NSString *output = [self runCommand: strCommmandCopy];
+                    NSLog(@"\nrunDownloadSW_FW [Firmware] output: %@: ", output);
+                    NSString *downloadStatus = [NSString stringWithFormat:@"Download new firmware successfully."];
+                    dispatch_async(dispatch_get_main_queue(), ^{
+                        lbConnectGCSLabel.stringValue = downloadStatus;
+
+                    });
+                    
+                    
+                    //sleep(3);
+                    //exit(0);
+                    
+                } else {
+                    NSLog(@"\nrunDownloadSW_FW [Firmware] Unzip unsuccessfully");
+                    NSString *downloadStatus = [NSString stringWithFormat:@"Download new firmware unsuccessfully."];
+                    dispatch_async(dispatch_get_main_queue(), ^{
+                        lbConnectGCSLabel.stringValue = downloadStatus;
+
+                    });
+                    
+                    isUnzippedSW = FALSE;
+                    isDownloadedSW = FALSE;
+                    isDownloadingSW = FALSE;
+                    
+                    isUnzippedFW = FALSE;
+                    isDownloadedFW = FALSE;
+                    isDownloadingFW = FALSE;
+                    //NSString *output = [self runCommand: @"rm /Users/tringuyen/Documents/EarseWatch/NewSoftware/*"];
+                    //NSLog(@"\nrunDownloadSW_FW unsuccessfully output: %@: ", output);
+                }
+            }
+        }
+
+        
+        
+        
+        if (isDownloadingSW)
+        {
+            isDownloadingSW = FALSE;
+            NSURLSessionConfiguration *configuration = [NSURLSessionConfiguration defaultSessionConfiguration];
+            AFURLSessionManager *manager = [[AFURLSessionManager alloc] initWithSessionConfiguration:configuration];
+
+            NSString *linkDownloadSWTemp = @"https://b011086fa2a305b25393-d9a427afbab97d13dae330d7e969a9b9.ssl.cf1.rackcdn.com/Software";
+            NSString *linkDownloadSW = [NSString stringWithFormat:@"%@/%@/%@", linkDownloadSWTemp, versionSW_DownloadSW, @"setup.tar.gz"];
+            NSLog(@"\nlinkDownloadSW: %@", linkDownloadSW);
+
+            linkDownloadSW = @"https://www.sample-videos.com/zip/50mb.zip";
+            NSURL *URL = [NSURL URLWithString:linkDownloadSW];
+            NSURLRequest *request = [NSURLRequest requestWithURL:URL];
+            
+            NSLog(@"[runDownloadSW_FW] urlDownloadFolderPath 1: %@", urlDownloadFolderPath);
+
+            NSURLSessionDownloadTask *downloadTask = [manager downloadTaskWithRequest:request progress:^(NSProgress * _Nonnull downloadProgress)
+            {
+                NSLog(@"[runDownloadSW_FW] Progress: %f", downloadProgress.fractionCompleted*100);
+                
+                int percentage = [[NSNumber numberWithFloat:downloadProgress.fractionCompleted*100] intValue];
+
+                NSString *downloadStatus = [NSString stringWithFormat:@"Downloading the new software %d%@", percentage, @"%"];
+                dispatch_async(dispatch_get_main_queue(), ^{
+                    lbConnectGCSLabel.stringValue = downloadStatus;
+                    lbConnectGCSLabel.textColor = NSColor.redColor;
+
+                });
+               
+            } destination:^NSURL *(NSURL *targetPath, NSURLResponse *response) {
+                //NSURL *documentsDirectoryURL = [[NSFileManager defaultManager] URLForDirectory:NSDocumentDirectory inDomain:NSUserDomainMask appropriateForURL:nil create:NO error:nil];
+                return [urlDownloadFolderPath URLByAppendingPathComponent:[response suggestedFilename]];
+            } completionHandler:^(NSURLResponse *response, NSURL *filePath, NSError *error)
+            {
+                NSLog(@"[runDownloadSW_FW] [response suggestedFilename]: %@", [response suggestedFilename]);
+                fileNameZip = [response suggestedFilename];
+                NSLog(@"[runDownloadSW_FW] File downloaded to: %@", filePath);
+                isDownloadedSW = TRUE;
+            }];
+            [downloadTask resume];
+        }
+        if (isDownloadedSW) {
+            if(!isUnzippedSW) {
+                NSString *downloadFolderPath = [NSString stringWithFormat: @"%@%@", documentPath, @"/EarseWatch/NewSoftware/"];
+                NSString *fileZipPath = [NSString stringWithFormat: @"%@%@", downloadFolderPath, fileNameZip];
+
+                if ([SSZipArchive unzipFileAtPath: fileZipPath toDestination: urlDownloadFolderPath.path]) {
+                    NSLog(@"\nrunDownloadSW_FW Unzip successfully");
+                    isUnzippedSW = TRUE;
+                    //runCommand(@"cp -R /Users/tringuyen/Documents/EarseWatch/NewSoftware/emac_client.app /Users/tringuyen/Documents/EarseWatch");
+                    
+                    NSString *source = [NSString stringWithFormat: @"%@%@", documentPath, @"/EarseWatch/NewSoftware/EarseWatch.app"];
+                    NSString *destination = [NSString stringWithFormat: @"%@%@", documentPath, @"/EarseWatch/"];
+                    NSString *strCommmandCopy = [NSString stringWithFormat: @"cp -Rf %@ %@", source, destination];
+                    NSLog(@"\nrunDownloadSW_FW strCommmandCopy: %@ ", strCommmandCopy);
+
+                    NSString *output = [self runCommand: strCommmandCopy];
+                    NSLog(@"\nrunDownloadSW_FW output: %@: ", output);
+                    NSString *downloadStatus = [NSString stringWithFormat:@"Download new software successfully."];
+                    dispatch_async(dispatch_get_main_queue(), ^{
+                        lbConnectGCSLabel.stringValue = downloadStatus;
+                        lbConnectGCSLabel.textColor = NSColor.redColor;
+                    });
+//                    sleep(3);
+//                    exit(0);
+                } else {
+                    NSLog(@"\nrunDownloadSW_FW Unzip unsuccessfully");
+                    NSString *downloadStatus = [NSString stringWithFormat:@"Download new software unsuccessfully."];
+                    dispatch_async(dispatch_get_main_queue(), ^{
+                        lbConnectGCSLabel.stringValue = downloadStatus;
+
+                    });
+                    isUnzippedSW = FALSE;
+                    isDownloadedSW = FALSE;
+                    isDownloadingSW = FALSE;
+                    
+                    isUnzippedFW = FALSE;
+                    isDownloadedFW = FALSE;
+                    isDownloadingFW = FALSE;
+                    //NSString *output = [self runCommand: @"rm /Users/tringuyen/Documents/EarseWatch/NewSoftware/*"];
+                    //NSLog(@"\nrunDownloadSW_FW unsuccessfully output: %@: ", output);
+                }
+            }
+        }
+    }
+    
+}
+
+
+BOOL checkDownload = FALSE;
+BOOL sendMachineInfo = FALSE;
+BOOL sendMapping = FALSE;
+BOOL sendDeviceMappingVerify = FALSE;
+BOOL sendLinkServerVerify = FALSE;
+
+
+NSString *ftpServer = @"cloud.greystonedatatech.com";
+NSString *ftpServerPath = @"\/Mini-ZeroIT\/Setting";
+NSString *ftpClientPath = @"\/ZeroIT";
+NSString *ftpUsername = @"ftpupload";
+NSString *ftpPassword = @"123Qwe!@#";
+NSString *ftpPort = @"21";
+NSString *ftpFilename = @"gds_mobile_table_carrier.sql";
+
+- (void) runCheckDownloadSW_FW
+{
+    //{ "apps_version" : "3.57", "checksum" : 0, "command" : 2, "firmware" : "2.2a;", "hardware" : "1.0c;", "key" : 1152, "machine_type":"iwatch_eraser","manual_update" : "", "modelsystem" : 1, "prversion" : 4, "software" : "STR.A16.88", "stationsn" : "10C37B9DC6DE", "status" : 0 }
+    NSString *hwVersionMain = @"";
+    NSString *fwVersionMain = @"";
+    arrVersionFW = [[NSMutableArray alloc]init];
+    if (arrayBoard.count > 0) {
+
+        for (int i = 0; i < arrayBoard.count; i++)
+        {
+            NSMutableDictionary *dic = [arrayBoard objectAtIndex:i];
+            NSLog(@"[runCheckDownloadSW_FW] dicTemp: %@", dic);
+            NSDictionary *version = [dic objectForKey:@"VersionHW"];
+            NSString *fwVersion = [version objectForKey:@"firmware"];
+            NSString *hwVersion = [version objectForKey:@"hardware"];
+            NSLog(@"[runCheckDownloadSW_FW] hwVersion: %@", hwVersion);
+            NSLog(@"[runCheckDownloadSW_FW] fwVersion: %@", fwVersion);
+            
+            arrVersionFW[i] = fwVersion;
+
+            if ([fwVersionMain  isEqual: @""])
+            {
+                fwVersionMain = [fwVersionMain stringByAppendingString:fwVersion];
+            }
+            else {
+                fwVersionMain = [fwVersionMain stringByAppendingFormat:@"; %@" , fwVersion];
+            }
+            
+            if ([hwVersionMain  isEqual: @""])
+            {
+                hwVersionMain = [hwVersionMain stringByAppendingString:hwVersion];
+            }
+            else {
+                hwVersionMain = [hwVersionMain stringByAppendingFormat:@"; %@", hwVersion];
+            }
+
+        }
+        NSLog(@"[runCheckDownloadSW_FW] hwVersionMain: %@", hwVersionMain);
+        NSLog(@"[runCheckDownloadSW_FW] fwVersionMain: %@", fwVersionMain);
+    }
+    
+    //Create device mapping package
+    NSMutableDictionary *dictDeviceMapping = [[NSMutableDictionary alloc]init];
+    [dictDeviceMapping setValue:@(1) forKey:@"modelsystem"];
+    [dictDeviceMapping setValue:@(5) forKey:@"prversion"];
+    [dictDeviceMapping setValue:@(16) forKey:@"command"];
+    [dictDeviceMapping setValue:@(0) forKey:@"status"];
+    //[dictMapping setValue:stationSN forKey:@"stationsn"];
+    [dictDeviceMapping setValue:@"9801A79D664B" forKey:@"stationsn"];
+    [dictDeviceMapping setValue:@(99) forKey:@"key"];
+    [dictDeviceMapping setValue:@"iwatch_eraser" forKey:@"machine_type"];
+    
+    //Create device mapping verify package
+    NSMutableDictionary *dictDeviceMappingVerify = [[NSMutableDictionary alloc]init];
+    [dictDeviceMappingVerify setValue:@(1) forKey:@"modelsystem"];
+    [dictDeviceMappingVerify setValue:@(5) forKey:@"prversion"];
+    [dictDeviceMappingVerify setValue:@(17) forKey:@"command"];
+    [dictDeviceMappingVerify setValue:@(0) forKey:@"status"];
+    //[dictMapping setValue:stationSN forKey:@"stationsn"];
+    [dictDeviceMappingVerify setValue:@"9801A79D664B" forKey:@"stationsn"];
+    [dictDeviceMappingVerify setValue:@(99) forKey:@"key"];
+    [dictDeviceMappingVerify setValue:@"iwatch_eraser" forKey:@"machine_type"];
+    [dictDeviceMappingVerify setValue:@(1) forKey:@"type"];
+    
+    
+    //Create link server verify package
+    NSMutableDictionary *dictLinkServerVerify = [[NSMutableDictionary alloc]init];
+    [dictLinkServerVerify setValue:@(1) forKey:@"modelsystem"];
+    [dictLinkServerVerify setValue:@(5) forKey:@"prversion"];
+    [dictLinkServerVerify setValue:@(17) forKey:@"command"];
+    [dictLinkServerVerify setValue:@(0) forKey:@"status"];
+    //[dictMapping setValue:stationSN forKey:@"stationsn"];
+    [dictLinkServerVerify setValue:@"9801A79D664B" forKey:@"stationsn"];
+    [dictLinkServerVerify setValue:@(99) forKey:@"key"];
+    [dictLinkServerVerify setValue:@"iwatch_eraser" forKey:@"machine_type"];
+    [dictLinkServerVerify setValue:@(0) forKey:@"type"];
+    
+    NSError *errMappingVerify;
+    NSData *jsonDataMappingVerify = [NSJSONSerialization dataWithJSONObject:dictDeviceMappingVerify options:NSJSONWritingPrettyPrinted error:&errMappingVerify];
+    NSLog(@"[runCheckDownloadSW_FW][NSURLSessionDataTask] jsonDataMappingVerify JSON = %@", [[NSString alloc] initWithData:jsonDataMappingVerify encoding:NSUTF8StringEncoding]);
+
+    //Create machine info package
+    NSError *errMapping;
+    NSData *jsonDataMapping = [NSJSONSerialization dataWithJSONObject:dictDeviceMapping options:NSJSONWritingPrettyPrinted error:&errMapping];
+    NSLog(@"[runCheckDownloadSW_FW][NSURLSessionDataTask] jsonDataMapping JSON = %@", [[NSString alloc] initWithData:jsonDataMapping encoding:NSUTF8StringEncoding]);
+    
+    NSMutableDictionary *dictMachineInfo = [[NSMutableDictionary alloc]init];
+    [dictMachineInfo setValue:@"iwatch_eraser" forKey:@"machine_type"];
+    [dictMachineInfo setValue:stationSN forKey:@"stationsn"];
+    [dictMachineInfo setValue:@(30) forKey:@"command"];
+    [dictMachineInfo setValue:@(4) forKey:@"prversion"];
+    [dictMachineInfo setValue:VERSION forKey:@"software_version"];
+    [dictMachineInfo setValue:fwVersionMain forKey:@"firmware_version"];
+    [dictMachineInfo setValue:hwVersionMain forKey:@"hardware_version"];
+    [dictMachineInfo setValue:@"machine_version_log" forKey:@"action"];
+    [dictMachineInfo setValue:@(0) forKey:@"checksum"];
+    [dictMachineInfo setValue:@(1) forKey:@"modelsystem"];
+    [dictMachineInfo setValue:@(0) forKey:@"status"];
+    
+    NSError *err;
+    NSData *jsonDataMachineInfo = [NSJSONSerialization dataWithJSONObject:dictMachineInfo options:NSJSONWritingPrettyPrinted error:&err];
+    NSLog(@"[runCheckDownloadSW_FW][NSURLSessionDataTask] machine info JSON = %@", [[NSString alloc] initWithData:jsonDataMachineInfo encoding:NSUTF8StringEncoding]);
+
+
+
+    while (TRUE)
+    {
+        NSLog(@"Thread 30(s) Asks server to download SW & FW %lu", (unsigned long)arrayBoard.count);
+        
+        if(sendLinkServerVerify) {
+            int sizeOfarrPushingList = arrPushingListMain.count - 1;
+            NSLog(@"[runCheckDownloadSW_FW] [Link-Server-Verify] sizeOfarrPushingList: %d", sizeOfarrPushingList);
+
+            if (sizeOfarrPushingList > 1) {
+                int randomNumber = [self getRandomNumberBetween:0 and:sizeOfarrPushingList];
+                linkServer = arrPushingListMain[randomNumber];
+            } else if (sizeOfarrPushingList == 1) {
+                linkServer = arrPushingListMain[0];
+            }
+            
+            linkServer = @"http://gsitest.greystonedatatech.com/gsicloud/public/";
+            NSURL *URL = [NSURL URLWithString:linkServer];
+            //2 - create AFNetwork manager
+            AFHTTPSessionManager *manager = [[AFHTTPSessionManager alloc]initWithSessionConfiguration:[NSURLSessionConfiguration defaultSessionConfiguration]];
+            
+            //manager.requestSerializer = [AFJSONRequestSerializer serializer];
+            //manager.responseSerializer.acceptableContentTypes = [NSSet setWithObject:@"text/plain"];
+            manager.requestSerializer = [AFJSONRequestSerializer serializer];
+            manager.responseSerializer = [AFHTTPResponseSerializer serializer];
+            
+            [manager.requestSerializer setValue:@"application/json" forHTTPHeaderField:@"Content-Type"];
+            //3 - set a body
+            //4 - create request
+            [manager POST: URL.absoluteString
+               parameters: dictLinkServerVerify
+                 progress: nil
+             //5 - response handling
+                  success:^(NSURLSessionDataTask * _Nonnull task, id  _Nullable responseObject) {
+                    @try {
+                        NSString *jsonStringResponse = [[NSString alloc] initWithData:responseObject encoding:NSUTF8StringEncoding];
+                        NSLog(@"[runCheckDownloadSW_FW][NSURLSessionDataTask] [Link-Server-Verify] jsonStringResponse: %@", jsonStringResponse);
+                        NSData *data = [jsonStringResponse dataUsingEncoding:NSUTF8StringEncoding];
+                        //software
+                        id json = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
+                        sendLinkServerVerify = FALSE;
+                    }
+                    @catch (NSException *exception) {
+                      NSLog(@"[runCheckDownloadSW_FW][NSURLSessionDataTask] [Link-Server-Verify] NSException exception.reason: %@", exception.reason);
+                    }
+                    @finally {
+                      NSLog(@"[runCheckDownloadSW_FW][NSURLSessionDataTask] [Link-Server-Verify] Finally condition");
+                    }
+                    
+
+            }
+                  failure:^(NSURLSessionDataTask * _Nullable task, NSError * _Nonnull error) {
+                NSLog(@"[GetServer][NSURLSessionDataTask] [Link-Server-Verify] error: %@", error);
+            }
+            ];
+        }
+        
+        if (!sendMapping) {
+            int sizeOfarrPushingList = arrPushingListMain.count - 1;
+            NSLog(@"[runCheckDownloadSW_FW] [Device-Mapping] sizeOfarrPushingList: %d", sizeOfarrPushingList);
+
+            if (sizeOfarrPushingList > 1) {
+                int randomNumber = [self getRandomNumberBetween:0 and:sizeOfarrPushingList];
+                linkServer = arrPushingListMain[randomNumber];
+            } else if (sizeOfarrPushingList == 1) {
+                linkServer = arrPushingListMain[0];
+            }
+            
+            linkServer = @"http://gsitest.greystonedatatech.com/gsicloud/public/";
+            NSURL *URL = [NSURL URLWithString:linkServer];
+            //2 - create AFNetwork manager
+            AFHTTPSessionManager *manager = [[AFHTTPSessionManager alloc]initWithSessionConfiguration:[NSURLSessionConfiguration defaultSessionConfiguration]];
+            
+            //manager.requestSerializer = [AFJSONRequestSerializer serializer];
+            //manager.responseSerializer.acceptableContentTypes = [NSSet setWithObject:@"text/plain"];
+            manager.requestSerializer = [AFJSONRequestSerializer serializer];
+            manager.responseSerializer = [AFHTTPResponseSerializer serializer];
+            
+            [manager.requestSerializer setValue:@"application/json" forHTTPHeaderField:@"Content-Type"];
+            //3 - set a body
+            //4 - create request
+            [manager POST: URL.absoluteString
+               parameters: dictDeviceMapping
+                 progress: nil
+             //5 - response handling
+                  success:^(NSURLSessionDataTask * _Nonnull task, id  _Nullable responseObject) {
+                    @try {
+                        NSString *jsonStringResponse = [[NSString alloc] initWithData:responseObject encoding:NSUTF8StringEncoding];
+                        NSLog(@"[runCheckDownloadSW_FW][NSURLSessionDataTask] [Device-Mapping] jsonStringResponse: %@", jsonStringResponse);
+                        NSData *data = [jsonStringResponse dataUsingEncoding:NSUTF8StringEncoding];
+                        //software
+                        id json = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
+                        if ([json objectForKey:@"type"] != nil) {
+                            NSNumber* mapType = [json objectForKey:@"type"];
+                            int typeIndex = [mapType intValue];
+                            
+                            //[runCheckDownloadSW_FW][NSURLSessionDataTask] [Device-Mapping] jsonStringResponse: {"stationsn":"9801A79D664B","modelsystem":1,"prversion":5,"command":16,"status":0,"type":1,"filename":"gds_mobile_table_carrier.sql","serverpath":"\/Mini-ZeroIT\/Setting","clientpath":"\/ZeroIT","ftpserver":"cloud.greystonedatatech.com","ftpport":"21","ftpusername":"ftpupload","ftppassword":"123Qwe!@#","checksum":256,"key":99}
+                            if (typeIndex == 1) {
+                                ftpServer = [json objectForKey:@"ftpserver"];
+                                ftpServerPath = [json objectForKey:@"serverpath"];
+                                ftpClientPath = [json objectForKey:@"clientpath"];
+                                ftpFilename = [json objectForKey:@"filename"];
+                                ftpPort = [json objectForKey:@"ftpport"];
+                                ftpUsername = [json objectForKey:@"ftpusername"];
+                                ftpPassword = [json objectForKey:@"ftppassword"];
+                                
+                                NSLog(@"[runCheckDownloadSW_FW][NSURLSessionDataTask] [Device-Mapping] ftpServer: %@", ftpServer);
+                                NSLog(@"[runCheckDownloadSW_FW][NSURLSessionDataTask] [Device-Mapping] ftpServerPath: %@", ftpServerPath);
+                                NSLog(@"[runCheckDownloadSW_FW][NSURLSessionDataTask] [Device-Mapping] ftpClientPath: %@", ftpClientPath);
+                                NSLog(@"[runCheckDownloadSW_FW][NSURLSessionDataTask] [Device-Mapping] ftpFilename: %@", ftpFilename);
+                                NSLog(@"[runCheckDownloadSW_FW][NSURLSessionDataTask] [Device-Mapping] ftpPort: %@", ftpPort);
+                                NSLog(@"[runCheckDownloadSW_FW][NSURLSessionDataTask] [Device-Mapping] ftpUsername: %@", ftpUsername);
+                                NSLog(@"[runCheckDownloadSW_FW][NSURLSessionDataTask] [Device-Mapping] ftpPassword: %@", ftpPassword);
+                                
+                                isDownloadingSQLMapping = TRUE;
+                                sendMapping = TRUE;
+                            } else if (typeIndex == 1) {
+                                if([json objectForKey:@"pushinglist"] != nil) {
+                                    arrPushingListMain = [json objectForKey:@"pushinglist"];
+                                    
+                                    NSLog(@"[runCheckDownloadSW_FW][GetServer][NSURLSessionDataTask] arrPushingListMain.count: %lu", (unsigned long)arrPushingListMain.count);
+
+                                    if (arrPushingListMain.count > 0) {
+                                        //NSError *error = nil;
+                                        //RLMRealmConfiguration *config = [RLMRealmConfiguration defaultConfiguration];
+                                        //RLMRealm *realm = [RLMRealm realmWithConfiguration:config error:&error];
+                                        RLMRealm *realm = [RLMRealm defaultRealm];
+                                        for(int i = 0; i < arrPushingListMain.count; i++) {
+                                            [realm beginWriteTransaction];
+                                            LinkServer *mLinkServer = [[LinkServer alloc] init];
+                                            mLinkServer.ID = [NSString stringWithFormat:@"%i", i];
+                                            mLinkServer.linkServer = arrPushingListMain[i];
+                                            NSLog(@"[runCheckDownloadSW_FW][NSURLSessionDataTask] mLinkServer.ID: %@", mLinkServer.ID);
+                                            NSLog(@"[runCheckDownloadSW_FW][NSURLSessionDataTask] mLinkServer.linkServer: %@",  mLinkServer.linkServer);
+                                            [realm addOrUpdateObject:mLinkServer];
+                                            [realm commitWriteTransaction];
+                                        }
+                                    }
+                                    NSLog(@"[runCheckDownloadSW_FW][NSURLSessionDataTask] update Link Server DONE!!!");
+                                    sendLinkServerVerify = TRUE;
+
+                                } else {
+                                    NSLog(@"[runCheckDownloadSW_FW][GetServer][NSURLSessionDataTask] Reply Couldn't parse status");
+                                }
+                            }
+                            
+                        }
+                    }
+                    @catch (NSException *exception) {
+                      NSLog(@"[runCheckDownloadSW_FW][NSURLSessionDataTask] [Device-Mapping] NSException exception.reason: %@", exception.reason);
+                    }
+                    @finally {
+                      NSLog(@"[runCheckDownloadSW_FW][NSURLSessionDataTask] [Device-Mapping] Finally condition");
+                    }
+                    
+
+            }
+                  failure:^(NSURLSessionDataTask * _Nullable task, NSError * _Nonnull error) {
+                NSLog(@"[GetServer][NSURLSessionDataTask] [Device-Mapping] error: %@", error);
+            }
+            ];
+            
+        } else {
+            if (sendDeviceMappingVerify) {
+                int sizeOfarrPushingList = arrPushingListMain.count - 1;
+                NSLog(@"[runCheckDownloadSW_FW] [Device-Mapping-Verify] sizeOfarrPushingList: %d", sizeOfarrPushingList);
+
+                if (sizeOfarrPushingList > 1) {
+                    int randomNumber = [self getRandomNumberBetween:0 and:sizeOfarrPushingList];
+                    linkServer = arrPushingListMain[randomNumber];
+                } else if (sizeOfarrPushingList == 1) {
+                    linkServer = arrPushingListMain[0];
+                }
+                
+                
+                
+                
+                
+                linkServer = @"http://gsitest.greystonedatatech.com/gsicloud/public/";
+                NSURL *URL = [NSURL URLWithString:linkServer];
+                //2 - create AFNetwork manager
+                AFHTTPSessionManager *manager = [[AFHTTPSessionManager alloc]initWithSessionConfiguration:[NSURLSessionConfiguration defaultSessionConfiguration]];
+                
+                //manager.requestSerializer = [AFJSONRequestSerializer serializer];
+                //manager.responseSerializer.acceptableContentTypes = [NSSet setWithObject:@"text/plain"];
+                manager.requestSerializer = [AFJSONRequestSerializer serializer];
+                manager.responseSerializer = [AFHTTPResponseSerializer serializer];
+                
+                [manager.requestSerializer setValue:@"application/json" forHTTPHeaderField:@"Content-Type"];
+                //3 - set a body
+                //4 - create request
+                [manager POST: URL.absoluteString
+                   parameters: dictDeviceMappingVerify
+                     progress: nil
+                 //5 - response handling
+                      success:^(NSURLSessionDataTask * _Nonnull task, id  _Nullable responseObject) {
+                        @try {
+                            NSString *jsonStringResponse = [[NSString alloc] initWithData:responseObject encoding:NSUTF8StringEncoding];
+                            NSLog(@"[runCheckDownloadSW_FW][NSURLSessionDataTask] [Device-Mapping-Verify] jsonStringResponse: %@", jsonStringResponse);
+                            NSData *data = [jsonStringResponse dataUsingEncoding:NSUTF8StringEncoding];
+                            //software
+                            id json = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
+                            
+                            isDownloadingSQLMapping = FALSE;
+                            sendMapping = FALSE;
+                            sendDeviceMappingVerify = FALSE;
+                        }
+                        @catch (NSException *exception) {
+                          NSLog(@"[runCheckDownloadSW_FW][NSURLSessionDataTask] [Device-Mapping-Verify] NSException exception.reason: %@", exception.reason);
+                        }
+                        @finally {
+                          NSLog(@"[runCheckDownloadSW_FW][NSURLSessionDataTask] [Device-Mapping-Verify] Finally condition");
+                        }
+                        
+
+                }
+                      failure:^(NSURLSessionDataTask * _Nullable task, NSError * _Nonnull error) {
+                    NSLog(@"[GetServer][NSURLSessionDataTask] [Device-Mapping-Verify] error: %@", error);
+                }
+                ];
+            }
+            
+            
+            if (!sendMachineInfo) {
+                int sizeOfarrPushingList = arrPushingListMain.count - 1;
+                NSLog(@"[runCheckDownloadSW_FW] [Machine Info] sizeOfarrPushingList: %d", sizeOfarrPushingList);
+
+                if (sizeOfarrPushingList > 1) {
+                    int randomNumber = [self getRandomNumberBetween:0 and:sizeOfarrPushingList];
+                    linkServer = arrPushingListMain[randomNumber];
+                } else if (sizeOfarrPushingList == 1) {
+                    linkServer = arrPushingListMain[0];
+                }
+                
+                NSLog(@"[runCheckDownloadSW_FW] [Machine Info] linkServer: %@", linkServer);
+
+                
+                linkServer = @"http://gsitest.greystonedatatech.com/gsicloud/public/";
+                
+                NSLog(@"[runCheckDownloadSW_FW] [Machine Info] REAL linkServer: %@", linkServer);
+
+                NSURL *URL = [NSURL URLWithString:linkServer];
+                //2 - create AFNetwork manager
+                AFHTTPSessionManager *manager = [[AFHTTPSessionManager alloc]initWithSessionConfiguration:[NSURLSessionConfiguration defaultSessionConfiguration]];
+                
+                //manager.requestSerializer = [AFJSONRequestSerializer serializer];
+                //manager.responseSerializer.acceptableContentTypes = [NSSet setWithObject:@"text/plain"];
+                manager.requestSerializer = [AFJSONRequestSerializer serializer];
+                manager.responseSerializer = [AFHTTPResponseSerializer serializer];
+                
+                [manager.requestSerializer setValue:@"application/json" forHTTPHeaderField:@"Content-Type"];
+                //3 - set a body
+                //4 - create request
+                [manager POST: URL.absoluteString
+                   parameters: dictMachineInfo
+                     progress: nil
+                 //5 - response handling
+                      success:^(NSURLSessionDataTask * _Nonnull task, id  _Nullable responseObject) {
+                        @try {
+                            NSString *jsonStringResponse = [[NSString alloc] initWithData:responseObject encoding:NSUTF8StringEncoding];
+                            NSLog(@"[runCheckDownloadSW_FW][NSURLSessionDataTask] [Machine Info] jsonStringResponse: %@", jsonStringResponse);
+                            NSData *data = [jsonStringResponse dataUsingEncoding:NSUTF8StringEncoding];
+                            //software
+                            id json = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
+                            if([json objectForKey:@"status"] != nil) {
+             
+                                NSString *status = [json objectForKey:@"status"];
+                                if ([status  isEqual: @"OK"]) {
+                                    sendMachineInfo = TRUE;
+                                }
+                            }
+                        }
+                        @catch (NSException *exception) {
+                          NSLog(@"[runCheckDownloadSW_FW][NSURLSessionDataTask] [Machine Info] NSException exception.reason: %@", exception.reason);
+                        }
+                        @finally {
+                          NSLog(@"[runCheckDownloadSW_FW][NSURLSessionDataTask] [Machine Info] Finally condition");
+                        }
+                        
+
+                }
+                      failure:^(NSURLSessionDataTask * _Nullable task, NSError * _Nonnull error) {
+                    NSLog(@"[GetServer][NSURLSessionDataTask] [Machine Info] error: %@", error);
+                }
+                ];
+            }
+        }
+
+        if (!checkDownload)
+        {
+            NSMutableDictionary *dictDownloadSW_FW = [[NSMutableDictionary alloc]init];
+//            [dictDownloadSW_FW setValue:@(2) forKey:@"command"];
+//            [dictDownloadSW_FW setValue:@(0) forKey:@"checksum"];
+//            [dictDownloadSW_FW setValue:@"1.00" forKey:@"apps_version"];
+//            [dictDownloadSW_FW setValue:fwVersionMain forKey:@"firmware"];
+//            [dictDownloadSW_FW setValue:hwVersionMain forKey:@"hardware"];
+//            [dictDownloadSW_FW setValue:VERSION forKey:@"software"];
+//            [dictDownloadSW_FW setValue:stationSN forKey:@"stationsn"];
+//            [dictDownloadSW_FW setValue:@"1.0c;" forKey:@"key"];
+//            [dictDownloadSW_FW setValue:@"" forKey:@"manual_update"];
+//            [dictDownloadSW_FW setValue:@(1) forKey:@"modelsystem"];
+//            [dictDownloadSW_FW setValue:@(4) forKey:@"prversion"];
+//            [dictDownloadSW_FW setValue:@(0) forKey:@"status"];
+//            [dictDownloadSW_FW setValue:@"iwatch_eraser" forKey:@"machine_type"];
+            
+            //{ "apps_version" : "3.57", "checksum" : 0, "command" : 2, "firmware" : "2.2a;", "hardware" : "1.0c;", "key" : 1152, "machine_type":"iwatch_eraser","manual_update" : "", "modelsystem" : 1, "prversion" : 4, "software" : "STR.A16.88", "stationsn" : "10C37B9DC6DE", "status" : 0 }
+            [dictDownloadSW_FW setValue:@(2) forKey:@"command"];
+            [dictDownloadSW_FW setValue:@(0) forKey:@"checksum"];
+            [dictDownloadSW_FW setValue:@"3.57" forKey:@"apps_version"];
+            [dictDownloadSW_FW setValue:@"2.2a;" forKey:@"firmware"];
+            [dictDownloadSW_FW setValue:@"1.0c;" forKey:@"hardware"];
+            [dictDownloadSW_FW setValue:@"STR.A16.88" forKey:@"software"];
+            [dictDownloadSW_FW setValue:@"10C37B9DC6DE" forKey:@"stationsn"];
+            [dictDownloadSW_FW setValue:@"1.0c;" forKey:@"key"];
+            [dictDownloadSW_FW setValue:@"" forKey:@"manual_update"];
+            [dictDownloadSW_FW setValue:@(1) forKey:@"modelsystem"];
+            [dictDownloadSW_FW setValue:@(4) forKey:@"prversion"];
+            [dictDownloadSW_FW setValue:@(0) forKey:@"status"];
+            [dictDownloadSW_FW setValue:@"iwatch_eraser" forKey:@"machine_type"];
+            NSError *err;
+            NSData *jsonData = [NSJSONSerialization dataWithJSONObject:dictDownloadSW_FW options:NSJSONWritingPrettyPrinted error:&err];
+            NSLog(@"[runCheckDownloadSW_FW][NSURLSessionDataTask] JSON = %@", [[NSString alloc] initWithData:jsonData encoding:NSUTF8StringEncoding]);
+            // 1 - define resource URL
+            
+            int sizeOfarrPushingList = arrPushingListMain.count - 1;
+            NSLog(@"[runCheckDownloadSW_FW] sizeOfarrPushingList: %d", sizeOfarrPushingList);
+
+            if (sizeOfarrPushingList > 1) {
+                int randomNumber = [self getRandomNumberBetween:0 and:sizeOfarrPushingList];
+                linkServer = arrPushingListMain[randomNumber];
+            } else if (sizeOfarrPushingList == 1) {
+                linkServer = arrPushingListMain[0];
+            }
+            
+            
+            linkServer = @"http://gsitest.greystonedatatech.com/gsicloud/public/";
+            NSURL *URL = [NSURL URLWithString:linkServer];
+            //2 - create AFNetwork manager
+            AFHTTPSessionManager *manager = [[AFHTTPSessionManager alloc]initWithSessionConfiguration:[NSURLSessionConfiguration defaultSessionConfiguration]];
+            
+            //manager.requestSerializer = [AFJSONRequestSerializer serializer];
+            //manager.responseSerializer.acceptableContentTypes = [NSSet setWithObject:@"text/plain"];
+            manager.requestSerializer = [AFJSONRequestSerializer serializer];
+            manager.responseSerializer = [AFHTTPResponseSerializer serializer];
+            
+            [manager.requestSerializer setValue:@"application/json" forHTTPHeaderField:@"Content-Type"];
+            //3 - set a body
+            //4 - create request
+            [manager POST: URL.absoluteString
+               parameters: dictDownloadSW_FW
+                 progress: nil
+             //5 - response handling
+                  success:^(NSURLSessionDataTask * _Nonnull task, id  _Nullable responseObject) {
+                    @try {
+                        NSString *jsonStringResponse = [[NSString alloc] initWithData:responseObject encoding:NSUTF8StringEncoding];
+                        NSLog(@"[runCheckDownloadSW_FW][NSURLSessionDataTask] jsonStringResponse: %@", jsonStringResponse);
+                        NSData *data = [jsonStringResponse dataUsingEncoding:NSUTF8StringEncoding];
+                        //software
+                        id json = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
+                        if([json objectForKey:@"software"] != nil) {
+                            NSString *currentVersionSW = VERSION;
+                            NSString *assignVersionSW = [json objectForKey:@"software"];
+                            NSString *assignVersionFW = [json objectForKey:@"firmware"];
+                            versionSW_DownloadSW = assignVersionSW;
+                            NSLog(@"[runCheckDownloadSW_FW][NSURLSessionDataTask] currentVersionSW: %@ assignVersionSW: %@", currentVersionSW, assignVersionSW);
+                            if (currentVersionSW != assignVersionSW) {
+                                if ([json objectForKey:@"status_update"] != nil) {
+                                    NSNumber* mapXNum = [json objectForKey:@"status_update"];
+                                    int statusUpdate = [mapXNum intValue];
+                                    NSLog(@"[runCheckDownloadSW_FW][NSURLSessionDataTask] statusUpdate: %d", statusUpdate);
+                                    if (statusUpdate == 1) {
+                                        NSLog(@"[runCheckDownloadSW_FW][NSURLSessionDataTask] Update new SW");
+                                        checkDownload = TRUE;
+                                        isDownloadingSW = TRUE;
+                                    } else {
+                                        NSLog(@"[runCheckDownloadSW_FW][NSURLSessionDataTask] Don't update new SW");
+                                        checkDownload = FALSE;
+                                    }
+                                }
+                            } else {
+                                if (![assignVersionFW  isEqual: @""]) {
+                                    for (int index = 0; index <= arrVersionFW.count; index++)
+                                    {
+                                        if (arrVersionFW[index] != assignVersionFW) {
+                                            isDownloadingFW = TRUE;
+                                            versionSW_DownloadFW = assignVersionFW;
+                                            break;
+                                        }
+                                    }
+                                }
+
+                                
+                            }
+
+
+                        }
+                        
+                    }
+                    @catch (NSException *exception) {
+                      NSLog(@"[runCheckDownloadSW_FW][NSURLSessionDataTask] NSException exception.reason: %@", exception.reason);
+                    }
+                    @finally {
+                      NSLog(@"[runCheckDownloadSW_FW][NSURLSessionDataTask] Finally condition");
+                    }
+                    
+
+            }
+                  failure:^(NSURLSessionDataTask * _Nullable task, NSError * _Nonnull error) {
+                NSLog(@"[GetServer][NSURLSessionDataTask] Reply error: %@", error);
+            }
+            ];
+            
+        }
+        
+        sleep(30);
+    }
+}
+
+
+- (void)runUpdate
+{
+    bool isLogout = NO;
+    while (isLogout == NO)
+    {
+        
+        NSTimeInterval timeBegin = [[NSDate date] timeIntervalSince1970];
+        [self scanDevice];
+        NSTimeInterval timeEnd = [[NSDate date] timeIntervalSince1970];
+        double timescand = timeEnd - timeBegin;
+        NSLog(@"timescand: %.2f",timescand);
+        //        [self checkledOnBoard];
+        if(timescand < (double)500.0)
+            sleep(1);
+        AppDelegate *delegate = (AppDelegate *)appDelegate;
+        isLogout = delegate.isLogout;
+    }
+}
+- (void)scanDevice
+{
+    for(int i=0; i < arrDatabaseCell.count; i++)
+    {
+        NSMutableDictionary *dicCell = [arrDatabaseCell objectAtIndex:i];
+        ProccessUSB *pro = (ProccessUSB *)[dicCell objectForKey:@"ProccessUSB"];
+        if([[dicCell objectForKey:@"status"] intValue] == CellHaveDevice)
+        {
+            NSString *UUID = [dicCell objectForKey:@"UniqueDeviceID"];
+            if(UUID != nil && UUID.length > 0)
+            {
+                AppDelegate *delegatedir = (AppDelegate *)[[NSApplication sharedApplication] delegate];
+                NSString *pathLib = [delegatedir pathLib];
+                NSString *cmd = [NSString stringWithFormat:@"%@/libimobiledevice/tools/ideviceinfo -x -u %@",pathLib,UUID];
+                NSString *output = [pro checkDevicePaired:cmd];
+                NSLog(@"output --------- : %@",output);
+                if([[output lowercaseString]rangeOfString:@"user denied pairing"].location != NSNotFound)
+                {
+                    [dicCell setObject:[NSNumber numberWithInt:CellCouldNotRead] forKey:@"status"];
+                    [dicCell setObject:@"Could not read device information" forKey:@"conten"];
+                    NSString *title = [dicCell objectForKey:@"title"];
+                    [self setLedOnBoardOfCell:title color:LED_RED_BLINK];
+                }
+            }
+        }
+        if([[dicCell objectForKey:@"status"] intValue] == CellCouldNotRead)
+        {
+            NSString *UUID = [dicCell objectForKey:@"UniqueDeviceID"];
+            if(UUID != nil && UUID.length > 0)
+            {
+                AppDelegate *delegatedir = (AppDelegate *)[[NSApplication sharedApplication] delegate];
+                NSString *pathLib = [delegatedir pathLib];
+                NSString *cmd = [NSString stringWithFormat:@"%@/libimobiledevice/tools/ideviceinfo -x -u %@",pathLib,UUID];
+                NSString *output = [pro checkDevicePaired:cmd];
+                NSLog(@"output --------- : %@",output);
+                if([[output lowercaseString]rangeOfString:@"user denied pairing"].location == NSNotFound &&
+                   [[output lowercaseString]rangeOfString:@"pairing dialog"].location == NSNotFound)
+                {
+                    NSDictionary *dic = [pro getInfoUSBDevice:UUID];
+                    NSLog(@"dic: %@",dic);
+                    if(dic == nil)
+                    {
+                        [self removeDevice:i];
+                    }
+                }
+            }
+        }
+        else if([[dicCell objectForKey:@"status"] intValue] == CellReady
+                || [[dicCell objectForKey:@"status"] intValue] == CellFinished) // reset cell
+        {
+            NSString *UUID = [dicCell objectForKey:@"UniqueDeviceID"];
+            if(UUID != nil && UUID.length > 0)
+            {
+                NSDictionary *dic = [pro getInfoUSBDevice:UUID];
+                NSLog(@"check unplug dic: %@",dic);
+                if(dic == nil)
+                {
+                    [self removeDevice:i];
+                }
+                
+            }
+        }
+    }
+    if([self updateDatabase] == 1)
+    {
+        dispatch_async(dispatch_get_main_queue(), ^{
+        //    [self.tableView reloadData];// modify cho nay lai neu chayn hanh qua se khong update UI
+            //CellTableClass *cellView = (CellTableClass*)[tableView viewAtColumn:col row:row makeIfNecessary:YES];
+            //arrDatabaseCell
+
+            for(int i=0; i < arrDatabaseCell.count; i++)
+            {
+                NSMutableDictionary *dicCell = [arrDatabaseCell objectAtIndex:i];
+                int row = [[dicCell objectForKey:@"row"] intValue];
+                int col = [[dicCell objectForKey:@"col"] intValue];
+                NSString *stringhtml = [NSString stringWithFormat:@"<p style=\"font-size:16px\">%@</p>", [dicCell objectForKey:@"conten"]];
+                
+                if([[dicCell objectForKey:@"status"] intValue] == CellRunning)
+                {
+                    if([[dicCell objectForKey:@"itemID"] isEqual:@""] || [dicCell objectForKey:@"itemID"] == nil) {
+                        stringhtml = [NSString stringWithFormat:@"<p style=\"font-size:16px\">%@ <p style=\"font-size:16px; color:red\" <br><b>Please enter item ID and press button again.</b></br></p></p>", [dicCell objectForKey:@"conten"]];
+                    }
+                }
+             [self settextToCell:col row:row text:stringhtml];
+                
+            }
+        });
+        
+    }
+}
+
+
+
+
+- (NSMutableDictionary *)getConfig
+{
+    AppDelegate *delegatedir = (AppDelegate *)[[NSApplication sharedApplication] delegate];
+    NSString *pathLib = [delegatedir pathLib];
+    NSLog(@"%s pathLib:%@",__func__,pathLib);
+    pathLib = [pathLib stringByAppendingString:@"/config/idevice_support.config"];
+    NSLog(@"%s pathconfig:%@",__func__,pathLib);
+    NSData *dataPlist = [NSData dataWithContentsOfFile:pathLib];
+    NSError *error=nil;
+    NSPropertyListFormat format;
+    NSMutableDictionary* dic = [NSPropertyListSerialization propertyListWithData:dataPlist
+                                                                    options:NSPropertyListImmutable
+                                                                     format:&format
+                                                                   error:&error];
+    NSLog( @"Dic Config: %@", dic );
+    if(!dic){
+        NSLog(@"Error: %@",error);
+    }
+    return dic;
+}
+
+- (void) createDatabase:(int)usbBoard
+{
+    if(arrDatabaseCell==nil)
+        arrDatabaseCell = [[NSMutableArray alloc] init];
+    [arrDatabaseCell removeAllObjects];
+    
+    NSMutableDictionary *options;
+    NSString *title=@"",*board =@"";
+    int dong,cot;
+    
+    for (int i=0; i<usbBoard; i++)
+    {
+        NSMutableDictionary *dic;
+        if(i==0) board = @"A";
+        else if(i==1) board = @"B";
+        else if(i==2) board = @"C";
+        else if(i==3) board = @"D";
+        cot = i;
+        
+        for (int j=0; j<8; j++)//moi board co 8 port
+        {
+            dong = j;
+            if(usbBoard == 1) // 1 board xuat tren 2 dong 4 cot
+            {
+                cot = j%numCol;
+                dong = (int)j/numCol;
+            }
+            else if(usbBoard == 2)// 1 board xuat tren 2 cot 4 dong
+            {
+                dong = j%numRow;
+                cot = (int)(j/numRow) + i*2; //moi board co 4 dong 2 cot ,=> 2board co1 4 dong 4 cot
+            }
+                 
+            ProccessUSB *libusbtemp= [[ProccessUSB alloc] init];
+            title = [NSString stringWithFormat:@"%@%d",board,j+1];
+            options = [[NSMutableDictionary alloc] init];
+            dic = [[NSMutableDictionary alloc] initWithObjectsAndKeys:
+                   [NSNumber numberWithInt:dong],@"row",
+                   [NSNumber numberWithInt:cot],@"col",
+                   [NSNumber numberWithInt:i*8+j],@"index",
+                   title, @"title",
+                   @"No device", @"conten",
+                   options,@"info",
+                   [NSNumber numberWithInt:0],@"update_info",
+                   @"",@"UniqueDeviceID",
+                   [NSNumber numberWithInt:1],@"CheckboxValue",
+                   [NSNumber numberWithInt:CellNoDevice],@"status",// trang thay cell
+                   [NSNumber numberWithInt:0],@"result",// ket qua cuoi cung
+                   [NSNumber numberWithInt:0],@"TimeProccess",// thoi gian chay erase
+                   [NSNumber numberWithInt:0],@"InfoUpdated",// da up date day du hay chua
+                   [NSNumber numberWithInt:numboard],@"num_board",// se update lai sau
+                   [NSNumber numberWithInt:0],@"counterTrust",
+                   @"",@"note",// ghi lai note muon hien len mang hinh , co the la ly do failed
+                   libusbtemp,@"ProccessUSB",
+                   @"00:00:00", @"elapsedTime",
+                   nil];
+            [arrDatabaseCell addObject:dic];
+        }
+    }
+}
+
+-(int)getRandomNumberBetween:(int)from and:(int)to {
+
+    return (int)from + arc4random() % (to-from+1);
+}
+
+DatabaseCom *mDatabaseCom;
+RLMThreadSafeReference *deviceInfoNeed2SendRef;
+RLMThreadSafeReference *deviceInfoVerifyNothingRef;
+
+DeviceInfo *deviceInfoNeed2Send;
+DeviceInfo *deviceInfoVerifyNothing;
+RLMResults<DeviceInfo *> *watchDeviceQueryVerifyNothing;
+
+RLMResults<DeviceMapping *> *watchDeviceQueryMapping;
+
+-(bool)updateDatabase
+{
+
+    dispatch_queue_t queue = dispatch_queue_create("database_access", 0);
+    RLMRealm *realm = [RLMRealm defaultRealm];
+
+    dispatch_async(queue, ^{
+        @autoreleasepool {
+            mDatabaseCom = [[DatabaseCom alloc] init];
+        }
+    });
+    
+    if(libusb == nil) libusb = [[ProccessUSB alloc] init];
+    int mustReload = 0;
+    NSLog(@"arrayBoard: \n%@", arrayBoard);
+    //check list device dang co
+    NSMutableArray *arrDevice = [libusb getListiWatchDevice];
+    if(arrDevice == nil)
+    {
+        NSLog(@"%s arrDevice return nill",__func__);
+        return 0;
+    }
+    NSLog(@"%s arrDevice iwatch:%d, list watch: %@",__func__,(int)arrDevice.count,arrDevice);
+    
+    //if(arrDevice.count == 0) return 0;
+    
+    checkInfoFlag ++;
+    if(checkInfoFlag>=MAX_ULONG)
+        checkInfoFlag = 0;
+    NSMutableDictionary *dic, *dicCell, *dicInfo;
+    NSString *conten = @"",*temp;
+    int n,capso=-1,coltemp = 0,rowtemp = 0;
+    
+    numDevice = (int)arrDevice.count;
+    
+  
+    
+    for (int i=0; i<numDevice; i++)
+    {
+        dic = [arrDevice objectAtIndex:i];
+               
+        NSString *UniqueDeviceID = [dic objectForKey:@"UniqueDeviceID"];
+        if(UniqueDeviceID.length<2)
+        {
+            continue;
+        }
+        // vi tri cell
+        NSString *strpath = [dic objectForKey:@"path"];
+        NSLog(@"%s path: %@",__func__,strpath);
+        //port 1: 6.1.3.2.4
+        //port 2: 6.1.3.2.3
+        //port 3: 6.1.3.2.2
+        //port 4: 6.1.3.2.1
+        //port 5: 6.1.3.4.4
+        //port 6: 6.1.3.4.3
+        //port 7: 6.1.3.4.2
+        //port 8: 6.1.3.4.1
+        
+        //=======================================================================================================================
+        // xac dinh vi tri dong cot tren ui
+        NSMutableArray *arrlocation = [[strpath componentsSeparatedByString:@"."] mutableCopy];
+        if(arrlocation.count <= 2)
+        {
+            if(i+1 < numDevice)
+            {
+               // NSLog(@"Cho nay phai khong");
+                NSMutableDictionary *dictemp = [arrDevice objectAtIndex:i+1];
+                NSString *pathtmp = [dictemp objectForKey:@"path"];
+                NSLog(@"%@",pathtmp);
+                [dic setObject:pathtmp forKey:@"path"];
+                arrlocation = [[pathtmp componentsSeparatedByString:@"."] mutableCopy];
+                NSLog(@"arrDevice: %@",arrDevice);
+            }
+        }
+        
+        
+        if(arrlocation.count>2)
+        {
+            coltemp = 0;rowtemp = 0;
+            
+            n = (int)arrlocation.count;
+            temp = [arrlocation objectAtIndex:n-2];
+            coltemp = [temp intValue];
+            temp = [arrlocation objectAtIndex:n-1];
+            rowtemp = [temp intValue];
+            
+            if(coltemp == 4)
+                coltemp = 4;
+            else coltemp = 0;
+            n = coltemp + (4-rowtemp);
+            
+            [arrlocation removeLastObject];
+            [arrlocation removeLastObject];
+            NSString *cap = [arrlocation componentsJoinedByString: @"."];
+            NSLog(@"usb cap: %@ vitri: %d",cap,n);
+            NSMutableDictionary *dictmp;
+            NSString *pathtemp;capso = -1;
+            for(int i=0; i<arrayBoard.count; i++)
+            {
+                dictmp = [arrayBoard objectAtIndex:i];
+                pathtemp = [dictmp objectForKey:@"path"];
+                if([pathtemp hasPrefix:cap] == YES)
+                {
+                    capso = i;
+                    break;
+                }
+            }
+            NSLog(@"%s usb cap: %@ vitri: cap %d,item:%d",__func__,cap,capso,n);
+        }
+        else
+        {
+            NSLog(@"%s usb cap config not valid",__func__);
+            continue;
+            //return NO;
+        }
+        
+        //=======================================================================================================================
+        //get info
+        temp = [dic objectForKey:@"UniqueDeviceID"];
+        if([temp rangeOfString:@" ECID:"].location == NSNotFound && temp.length > 1) // khong phai recovery mode va khac ->" "<-
+        {
+            if(temp.length < 25) // dang udid moi
+            {
+                NSMutableString *mu = [NSMutableString stringWithString:temp];
+                [mu insertString:@"-" atIndex:8];
+                temp = mu;
+            }
+            // su dung theread cho nay
+            dicInfo = [libusb getInfoUSBDevice:temp ];
+            
+        }
+        else
+        {
+            dicInfo = nil;
+        }
+               //  if(dicInfo==nil) continue;
+        
+        dicCell = [arrDatabaseCell objectAtIndex:(capso*8+n)];
+        NSLog(@"%s != c1  CellNoDevice SerialNumber  status %d",__func__, [[dicCell objectForKey:@"status"] intValue]);
+//        if([[dicCell objectForKey:@"status"] intValue] != CellNoDevice ) // khac running
+//        {
+//            NSString *UniqueDeviceID = [dicCell objectForKey:@"UniqueDeviceID"];
+//            NSLog(@"%s != c1  CellNoDevice SerialNumber  %@ temp %@ UniqueDeviceID %@",__func__, [dicInfo objectForKey:@"SerialNumber"], temp, UniqueDeviceID);
+//            if([dicInfo objectForKey:@"SerialNumber"] == nil && [UniqueDeviceID isEqualToString:temp])
+//            {
+//                NSLog(@"%s != CellNoDevice SerialNumber %@ temp %@ UniqueDeviceID %@",__func__, [dicInfo objectForKey:@"SerialNumber"], temp, UniqueDeviceID);
+//                temp = @"";
+//               // [self removeDevice:capso*8+n];// reset lai info
+//                mustReload = 1;
+//            }
+//
+//        }
+        
+        //else
+            if (temp.length > 2) {
+            if([[dicCell objectForKey:@"status"] intValue] == CellNoDevice)
+            {
+                sleep(1);
+                dispatch_async(dispatch_get_main_queue(), ^{
+                    
+                    [dicCell setObject:[NSNumber numberWithInt:CellHaveDevice] forKey:@"status"];
+                    NSString *title = [dicCell objectForKey:@"title"];
+                    [self setLedOnBoardOfCell:title color:LED_YELLOW];
+                    
+                    
+                    int row = [[dicCell objectForKey:@"row"] intValue];
+                    int col = [[dicCell objectForKey:@"col"] intValue];
+                    NSString * htmlString = [NSString stringWithFormat:@"Checking device"];
+                    [self settextToCell:col row:row text:htmlString];
+                    
+                });
+            }
+        }
+        //NSLog(@"%s update cap:%d, row:%d dic:%@,dicCell:%@",__func__,capso,n,dicInfo,dicCell);
+        NSLog(@"%s update cap:%d, row:%d dicCell:%@",__func__,capso,n,dicCell);
+        //tao conten
+        /*
+         CellNoDevice    = 0,//den tat           <=> chua co device
+         CellHaveDevice  = 1,//den vang          <=> co device dang doc thong tin
+         CellReady       = 2,//den xanh          <=> d9a dopc thogn tin thanh cong
+         CellRunning     = 3,//den vang          <=> bat dau xoa
+         CellChecking    = 4,//den vang          <=> write xong cho doc trang thay
+         CellFinished    = 5,// xanh hoac do     <=> ket thuc
+         CellCouldNotRead = 6, //do
+         */
+        NSLog(@"%s update database ===  position %@ status :%@",__func__,[dicCell objectForKey:@"title"],[dicCell objectForKey:@"status"]);
+        if([[dicCell objectForKey:@"status"] intValue] == CellHaveDevice ) // khac running
+        {
+            if(dicInfo != Nil)
+            {
+                NSString *name = [dicInfo objectForKey:@"ProductType"];
+                NSMutableDictionary *dicconfig = dicInforconfig[name];
+                if(dicconfig && dicconfig[@"idevice_name"]!=nil)
+                {
+                    name = dicconfig[@"idevice_name"];
+                    [dicCell setObject:name forKey:@"fullname"];
+                }
+                [dicCell setValue: name forKey:@"modelName"];
+                conten = [NSString stringWithFormat:@"<b>%@<br>Serial:</b> %@",name,[dicInfo objectForKey:@"SerialNumber"]];
+                if(numRow<8)
+                {
+                    if ([dicInfo objectForKey:@"InternationalMobileEquipmentIdentity"] == nil) {
+                        conten = [NSString stringWithFormat:@"<b>%@<br>IMEI:</b> %@<br><b>Serial:</b> %@<br><b>Firmware:</b> %@<br><b>Internal name:</b> %@<br><b>Capacity:</b> %@",
+                                  name,
+                                  @"N/A",
+                                  [dicInfo objectForKey:@"SerialNumber"],
+                                  [dicInfo objectForKey:@"ProductVersion"],
+                                  [dicInfo objectForKey:@"ProductType"],
+                                  [dicconfig objectForKey:@"capacity"]
+                        ];
+                    } else {
+                        conten = [NSString stringWithFormat:@"<b>%@<br>IMEI:</b> %@<br><b>Serial:</b> %@<br><b>Firmware:</b> %@<br><b>Internal name:</b> %@<br><b>Capacity:</b> %@",
+                                  name,
+                                  [dicInfo objectForKey:@"InternationalMobileEquipmentIdentity"],
+                                  [dicInfo objectForKey:@"SerialNumber"],
+                                  [dicInfo objectForKey:@"ProductVersion"],
+                                  [dicInfo objectForKey:@"ProductType"],
+                                  [dicconfig objectForKey:@"capacity"]
+                        ];
+                    }
+                    
+
+                }
+                
+                RLMResults<DeviceMapping *> *itemDeviceMapping = [DeviceMapping objectsWhere:@"icapture_pn = %@ ", [NSString stringWithFormat:@"%@%@",dicInfo[@"ModelNumber"],dicInfo[@"RegionInfo"]]];
+                NSLog(@"QUERY COLOR %@", [NSString stringWithFormat:@"%@%@",dicInfo[@"ModelNumber"],dicInfo[@"RegionInfo"]]);
+                NSLog(@"itemDeviceMapping.count: %lu", (unsigned long)itemDeviceMapping.count);
+
+                if (itemDeviceMapping.count > 0) {
+                    colorDevice = itemDeviceMapping[0].color;
+                    capacityDevice = itemDeviceMapping[0].capacity;
+                    carrierDevice = itemDeviceMapping[0].carrier;
+                    NSLog(@"itemDeviceMapping[0].color <=> colorDevice: %@", colorDevice);
+                    NSLog(@"itemDeviceMapping[0].capacity <=> capacityDevice: %@", capacityDevice);
+                    NSLog(@"itemDeviceMapping[0].carrier <=> carrierDevice: %@", carrierDevice);
+                }
+                
+
+
+                [dicCell setObject:dicInfo forKey:@"info"];
+                [dicCell setObject:[NSNumber numberWithInt:1] forKey:@"InfoUpdated"];
+                [dicCell setObject:[NSNumber numberWithLong:checkInfoFlag] forKey:@"update_info"];
+                
+                [dicCell setObject:[NSNumber numberWithLong:CellReady] forKey:@"status"];
+                NSString *title = [dicCell objectForKey:@"title"];
+                [self setLedOnBoardOfCell:title color:LED_GREEN];
+
+               
+            }
+            else// ko read dc info
+            {
+                
+                NSString *product = [dic objectForKey:@"product"];
+                if([[product lowercaseString] rangeOfString:@"watch"].location != NSNotFound)
+                {
+                    if([[dicCell objectForKey:@"InfoUpdated"] intValue] == 1)
+                    {
+                        NSLog(@"%s DBInfoUpdated 1", __func__);
+
+                        dicInfo = [dicCell objectForKey:@"info"];
+                        NSString *name = [dicInfo objectForKey:@"ProductType"];
+                        NSMutableDictionary *dicconfig = dicInforconfig[name];
+                        if(dicconfig && dicconfig[@"idevice_name"]!=nil)
+                        {
+                            name = dicconfig[@"idevice_name"];
+                            [dicCell setObject:name forKey:@"fullname"];
+                        }
+                        conten = [NSString stringWithFormat:@"<b>%@<br>Serial:</b> %@",name,[dicInfo objectForKey:@"SerialNumber"]];
+                        if(numRow<8)
+                        {
+                            conten = [NSString stringWithFormat:@"<b>%@<br>Serial:</b> %@<br><b>Firmware:</b> %@<br><b>Internal name:</b> %@<br><b>Capacity:</b> %@",
+                                      name,
+                                      [dicInfo objectForKey:@"SerialNumber"],
+                                      [dicInfo objectForKey:@"ProductVersion"],
+                                      [dicInfo objectForKey:@"ProductType"],
+                                      [dicconfig objectForKey:@"capacity"]
+                            ];
+                            
+
+                        }
+                        
+                        [dicCell setObject:dicInfo forKey:@"info"];
+                        [dicCell setObject:[NSNumber numberWithLong:checkInfoFlag] forKey:@"update_info"];
+                    }
+                    else
+                    {
+                        NSLog(@"%s DBInfoUpdated != 1 cell status: %d", __func__, [[dicCell objectForKey:@"status"] intValue]);
+
+                        dicInfo = [[dic objectForKey:@"info_ex"] mutableCopy];
+                        
+                        NSString *name = [dicInfo objectForKey:@"ProductType"];
+                        NSMutableDictionary *dicconfig = dicInforconfig[name];
+                        if(dicconfig && dicconfig[@"idevice_name"]!=nil)
+                        {
+                            name = dicconfig[@"idevice_name"];
+                            [dicCell setObject:name forKey:@"fullname"];
+                        }
+                        conten = [NSString stringWithFormat:@"<b>%@<br>Serial:</b> %@<br><b>Firmware:</b> %@<br><b>Internal name:</b> %@<br><b>Capacity:</b> %@",
+                                  name,
+                                  [dicInfo objectForKey:@"SerialNumber"],
+                                  [dicInfo objectForKey:@"ProductVersion"],
+                                  [dicInfo objectForKey:@"ProductType"],
+                                  [dicconfig objectForKey:@"capacity"]
+                        ];
+                                              
+                        int counterTrust = [[dicCell objectForKey:@"counterTrust"] intValue];
+                        counterTrust = counterTrust + 1;
+                        [dicCell setObject:[NSNumber numberWithInt:counterTrust] forKey:@"counterTrust"];
+                        NSLog(@"%s counterTrust: %d", __func__, counterTrust);
+
+                        if (counterTrust > 3) {
+                            
+                            conten = [NSString stringWithFormat:@"Please select trust on iDevice to allow PC access."];
+                            int row = [[dicCell objectForKey:@"row"] intValue];
+                            int col = [[dicCell objectForKey:@"col"] intValue];
+                            [self settextToCell:col row:row text:conten];
+                        } else {
+                            conten = [NSString stringWithFormat:@"Checking device"];
+                        }
+                   }
+                }
+                else
+                {
+                    conten = [NSString stringWithFormat:@"<b>Apple Watch N/A<br>Serial:</b> N/A"];
+                    NSLog(@"%s DBInfoUpdated 2", __func__);
+
+                }
+                [dicCell setObject:dicInfo forKey:@"info"];
+                mustReload = 1;
+                
+                [dicCell setObject:[NSNumber numberWithLong:checkInfoFlag] forKey:@"update_info"];// de check device van connect
+                
+            }
+            //conten = [NSString stringWithFormat:@"<p style=\"font-family:'Roboto-Regular';font-size:16px\">%@</p>",conten];
+            
+            [dicCell setObject:conten forKey:@"conten"];
+            [dicCell setObject:temp forKey:@"UniqueDeviceID"];
+           
+            //Add new May 5 2022 insert Realm Object
+            if([[dicCell objectForKey:@"status"] intValue] == CellReady)
+            {
+                
+                if(dicInfo != Nil)
+                {
+                  //  [dicCell setObject:[NSNumber numberWithInt:CellReady] forKey:@"status"];
+                  
+                   // sleep(1);
+                    NSDateFormatter *formatter = [[NSDateFormatter alloc] init];
+                    [formatter setDateFormat:@"yyyy-MM-dd HH:mm:ss"];
+                    
+                    NSDate *currentDate = [NSDate date];
+                    NSString *dateString = [formatter stringFromDate:currentDate];
+                    
+//                    RLMResults<DeviceMapping *> *itemDeviceMapping = [DeviceMapping objectsWhere:@"icapture_pn = %@", @" MU6W2LL/A"];
+//                    //NSLog(@"QUERY COLOR %@", [NSString stringWithFormat:@"%@%@",dicInfo[@"ModelNumber"],dicInfo[@"RegionInfo"]]);
+//                    NSLog(@"itemDeviceMapping.count: %lu", (unsigned long)itemDeviceMapping.count);
+//
+//                    if (itemDeviceMapping.count > 0) {
+//                        NSLog(@"itemDeviceMapping[0].color: %@", itemDeviceMapping[0].color);
+//                        NSLog(@"itemDeviceMapping[0].capacity: %@", itemDeviceMapping[0].capacity);
+//                        NSLog(@"itemDeviceMapping[0].carrier: %@", itemDeviceMapping[0].carrier);
+//                    }
+                    
+                    RLMRealm *realm = [RLMRealm defaultRealm];
+                    NSLog(@"Local database path: %@",[RLMRealmConfiguration defaultConfiguration].fileURL);
+                    [realm beginWriteTransaction];
+                    // Add DeviceInfo objects into realm
+                    DeviceInfo *deviceInfo = [[DeviceInfo alloc] init];
+                    deviceInfo.serialNumber = dicInfo[@"SerialNumber"];
+                    deviceInfo.productType = dicInfo[@"ProductType"];
+                    deviceInfo.productVersion = dicInfo[@"ProductVersion"];
+                    deviceInfo.productName = dicInfo[@"ProductName"];
+                    deviceInfo.bluetoothAddress = dicInfo[@"BluetoothAddress"];
+                    deviceInfo.wifiAddress = dicInfo[@"WiFiAddress"];
+                    deviceInfo.createTime = dateString;
+                    deviceInfo.modelNumber = [NSString stringWithFormat:@"%@%@",dicInfo[@"ModelNumber"],dicInfo[@"RegionInfo"]];
+                    deviceInfo.regionInfo = dicInfo[@"RegionInfo"];
+                    deviceInfo.resultOfErasure = RESULT_NA;
+                    deviceInfo.eraseVerify = VERIFY_NOTHING;
+                    deviceInfo.eraseStatus = @(ERASE_STATUS_NA);
+                    deviceInfo.itemID = @"";
+                    deviceInfo.IMEI = dicInfo[@"InternationalMobileEquipmentIdentity"];
+                    deviceInfo.elapsedTime = @"00:00:00";
+                    NSUUID *UUID = [[NSUUID alloc] init];
+                    NSString *id = [UUID UUIDString];
+                    [dicCell setValue:id forKey:@"eraseID"];
+                    deviceInfo.ID = id;
+                    
+                    deviceInfo.cellID = dicCell[@"title"];
+                    
+                    NSString *valueEraseID = [dicCell valueForKey:@"eraseID"];
+                    deviceInfo.modelName =  [dicCell valueForKey:@"modelName"];
+                    
+                    deviceInfo.colorDevice = colorDevice;
+                    deviceInfo.carrierDevice = carrierDevice;
+                    deviceInfo.capacityDevice = capacityDevice;
+                    
+                    
+                    
+                    NSLog(@"addObject ==========================> %@", valueEraseID);
+                    
+                    [realm addObject:deviceInfo];
+                    [realm commitWriteTransaction];
+                    
+                    deviceInfoNeed2SendRef = [RLMThreadSafeReference referenceWithThreadConfined:deviceInfo];
+ 
+                    
+                    //                    // Print all deviceInfoDB from realm
+                    //                    for (DeviceInfo *deviceInfoDB in [DeviceInfo allObjects]) {
+                    //                        NSLog(@"deviceInfoDB persisted to realm: %@", deviceInfoDB);
+                    //                    }
+                    
+                    [self setLedOnBoardOfCell:[dicCell objectForKey:@"title"] color:LED_GREEN];
+                }
+                NSLog(@"%s usb cap so:%d, item:%d",__func__,capso,n);
+                [arrDatabaseCell replaceObjectAtIndex:(capso*8+n) withObject:dicCell];
+                mustReload = 1;
+            }
+            NSLog(@"%s usb cap so:%d, item:%d",__func__,capso,n);
+            [arrDatabaseCell replaceObjectAtIndex:(capso*8+n) withObject:dicCell];
+            mustReload = 1;
+        }
+        else if ([[dicCell objectForKey:@"status"] intValue] == CellRunning)
+        { // status running
+            if(dicInfo != nil)
+                [dicCell setObject:dicInfo forKey:@"info"];
+            NSString *stringItemTemp = [dicCell objectForKey:@"itemID"];
+            NSLog(@"==========================> stringItemTemp %@", stringItemTemp);
+            if ([[dicCell objectForKey:@"status"] intValue] == CellRunning &&
+                ([stringVlItemIDTemp  isEqual: @""] || stringVlItemIDTemp == nil))
+            {
+                dispatch_async(dispatch_get_main_queue(), ^{
+                    self->lbPleaseScanItemID.stringValue = @"Please scan Item ID!";
+                    self->lbPleaseScanItemID.textColor = NSColor.redColor;
+                });
+            }
+            if(![stringItemTemp  isEqual: @""] && stringItemTemp != nil)
+            {
+                if(xoaManual == YES)
+                {
+                    //if(dicInfo == Nil) // mat ket noi
+                    //{
+                    //    if([[dicCell objectForKey:@"status"] intValue] != CellFinished)
+                    //        [dicCell setObject:[NSNumber numberWithInt:CellChecking] forKey:@"status"];// check read infomation
+                    //    [dicCell setObject:[NSNumber numberWithInt:1] forKey:@"result"];// passed
+                    //}
+                    //else
+                    //{
+                        NSMutableDictionary *dicInfo = [dicCell objectForKey:@"info"];
+                        
+                        if(dicInfo!=nil && [dicInfo objectForKey:@"ActivationState"]!=nil)
+                        {
+                           
+                            NSString *strActivationState = [NSString stringWithFormat:@"%@",[dicInfo objectForKey:@"ActivationState"]];
+                            if([strActivationState rangeOfString:@"Unactivated"].location != NSNotFound)
+                            {
+                                NSLog(@"%s Erasing passed  ============ ActivationState: Unactivated", __func__);
+                                NSString *conten = [NSString stringWithFormat:@"%@", [dicCell objectForKey:@"conten"]];
+                                conten = [conten stringByReplacingOccurrencesOfString:@"<br>Please go to Settings -> General -> Reset \n -> Erase All Content and Settings -> Select erase all to erase device" withString:@""];
+                                [dicCell setObject:conten forKey:@"conten"];
+                                [self setResult:1 dic:dicCell];
+                                [arrDatabaseCell replaceObjectAtIndex:(capso*8+n) withObject:dicCell];
+                              
+                                int row = [[dicCell objectForKey:@"row"] intValue];
+                                int col = [[dicCell objectForKey:@"col"] intValue];
+                                [tableView reloadDataForRowIndexes:[NSIndexSet indexSetWithIndex:row]
+                                                     columnIndexes:[NSIndexSet indexSetWithIndex:col]];
+                                NSString *stringhtml = [NSString stringWithFormat:@"<p style=\"font-size:16px\">%@</p>", [dicCell objectForKey:@"conten"]];
+
+                                dispatch_async(dispatch_get_main_queue(), ^{
+                                    [self settextToCell:col row:row text:stringhtml];
+                                    CellTableClass *cellView = (CellTableClass*)[self->tableView viewAtColumn:col row:row makeIfNecessary:YES];
+                                    cellView.imgResult.image = [NSImage imageNamed:@"passed_with_text"];
+                                    [cellView updateState:CellFinished];
+                                });
+                                
+                                AppDelegate *delegate = (AppDelegate *)[[NSApplication sharedApplication] delegate];
+                                if(delegate.autoPrint == YES)
+                                {
+                                    NSMutableArray *arrDataPrint = [NSMutableArray array];
+                                    [arrDataPrint addObject:dicCell];
+                                    if(arrDataPrint.count>0)
+                                    {
+                                        NSMutableDictionary *dicInfo = [NSMutableDictionary dictionary];
+                                        [dicInfo setObject:arrDataPrint forKey:@"DataPrint"];
+                                        printSetting = [[PrinterSetting alloc] initWithFrame:CGRectMake(0, 0, 620, 750) data:dicInfo];
+                                        NSRect rect = [NSScreen mainScreen].frame;
+                                        [printSetting view].frame = CGRectMake((rect.size.width - 620)/2, (rect.size.height -750)/2, 620, 750);
+                                        [printSetting view].layer.backgroundColor = [NSColor whiteColor].CGColor;
+                                        [printSetting view].layer.borderWidth = 2;
+                                        [printSetting btPrintClick:nil];
+                                        
+                                    }
+                                   
+                                }
+
+                            }
+                            
+                        }
+                    //}
+                }
+            }
+            mustReload = 1;
+
+            
+            
+        }
+        else if([[dicCell objectForKey:@"status"] intValue] == CellFinished)
+        {
+            if(dicInfo)
+            {
+                [dicCell setObject:[NSNumber numberWithLong:checkInfoFlag] forKey:@"update_info"];
+            }
+            // Add new May 5, 2022 Update object.
+            //RLMRealm *realm = [RLMRealm defaultRealm];
+            //[realm beginWriteTransaction];
+            
+            int row = [[dicCell objectForKey:@"row"] intValue];
+            int col = [[dicCell objectForKey:@"col"] intValue];
+            NSString *stringhtml = [NSString stringWithFormat:@"<p style=\"font-size:16px\">%@</p>", [dicCell objectForKey:@"conten"]];
+            //cellView.imgResult.image = [NSImage imageNamed:@"passed_with_text"];
+            dispatch_async(dispatch_get_main_queue(), ^{
+                [self settextToCell:col row:row text:stringhtml];
+                CellTableClass *cellView = (CellTableClass*)[self->tableView viewAtColumn:col row:row makeIfNecessary:YES];
+                cellView.imgResult.image = [NSImage imageNamed:@"passed_with_text"];
+                [cellView updateState:CellFinished];
+                int row = [[dicCell objectForKey:@"row"] intValue];
+                int col = [[dicCell objectForKey:@"col"] intValue];
+                [self->tableView reloadDataForRowIndexes:[NSIndexSet indexSetWithIndex:row]
+                                     columnIndexes:[NSIndexSet indexSetWithIndex:col]];
+            });
+
+            NSString *valueEraseID = [dicCell valueForKey:@"eraseID"];
+            watchDeviceQueryVerifyNothing = [DeviceInfo objectsWhere:@"eraseVerify = %@", @(VERIFY_NOTHING), @"ID = %@", valueEraseID];
+            NSLog(@"%s watchDeviceQueryVerifyNothing size: %lu", __func__, (unsigned long)watchDeviceQueryVerifyNothing.count);
+
+            if((unsigned long)watchDeviceQueryVerifyNothing.count > 0) {
+                for (int j = 0; j < (unsigned long)watchDeviceQueryVerifyNothing.count; j++) {
+                    deviceInfoVerifyNothingRef = [RLMThreadSafeReference referenceWithThreadConfined:watchDeviceQueryVerifyNothing[j]];
+                    dispatch_async(queue, ^{
+                        @autoreleasepool {
+                            @try {
+                                RLMRealm *realm = [RLMRealm defaultRealm];
+                                deviceInfoVerifyNothing = [realm resolveThreadSafeReference:deviceInfoVerifyNothingRef];
+                                if (!deviceInfoVerifyNothing) {
+                                    return;
+                                }
+                                if(![realm inWriteTransaction]) {
+                                    [realm transactionWithBlock:^{
+                                        
+                                        if([[dicCell objectForKey:@"result"] intValue] == RESULT_PASSED)
+                                        {
+                                            deviceInfoVerifyNothing.resultOfErasure = RESULT_PASSED;
+                                            deviceInfoVerifyNothing.eraseVerify = VERIFY_NEED_TO_SEND;
+                                            deviceInfoVerifyNothing.itemID = [dicCell objectForKey:@"itemID"];
+                                            deviceInfoVerifyNothing.elapsedTime = [dicCell objectForKey:@"elapsedTime"];
+
+                                            //[DeviceInfo createOrUpdateInRealm:realm withValue:@{@"ID": valueEraseID, @"resultOfErasure": @(RESULT_PASSED), @"eraseVerify": @(VERIFY_NEED_TO_SEND)}];
+                                        }
+                                        else
+                                        {
+                                            //[DeviceInfo createOrUpdateInRealm:realm withValue:@{@"ID": valueEraseID, @"resultOfErasure": @(RESULT_FAILED), @"eraseVerify": @(VERIFY_NEED_TO_SEND)}];
+                                            deviceInfoVerifyNothing.resultOfErasure = RESULT_FAILED;
+                                            deviceInfoVerifyNothing.eraseVerify = VERIFY_NEED_TO_SEND;
+                                            deviceInfoVerifyNothing.itemID = [dicCell objectForKey:@"itemID"];
+                                            deviceInfoVerifyNothing.elapsedTime = [dicCell objectForKey:@"elapsedTime"];
+
+                                        }
+
+                                    }];
+                                }
+                            }
+                            @catch (NSException *exception) {
+                              NSLog(@"watchDeviceQueryVerifyNothing NSException exception.reason: %@", exception.reason);
+                            }
+                            @finally {
+                              NSLog(@"watchDeviceQueryVerifyNothing Finally condition");
+                            }
+                        }
+                    });
+                }
+
+                                
+            }
+            // Add new May 5, 2022 Query object via eraseID (ID in database)
+            RLMResults<DeviceInfo *> *watchDeviceQuery = [DeviceInfo objectsWhere:@"eraseVerify = %@", @(VERIFY_NEED_TO_SEND)];
+            NSLog(@"%s watchDeviceQuery size: %lu", __func__, (unsigned long)watchDeviceQuery.count);
+            if((unsigned long)watchDeviceQuery.count > 0) {
+                
+                for (int i = 0; i < (unsigned long)watchDeviceQuery.count; i++)
+                {
+                    deviceInfoNeed2SendRef = [RLMThreadSafeReference referenceWithThreadConfined:watchDeviceQuery[i]];
+
+                    NSMutableDictionary *dictPrepare2Send = [[NSMutableDictionary alloc]init];
+                    
+                    NSString *stringWithoutProductType = [watchDeviceQuery[i].modelName stringByReplacingOccurrencesOfString:watchDeviceQuery[0].productType withString:@""];
+                    NSString *stringModelName = [stringWithoutProductType stringByReplacingOccurrencesOfString:@"()" withString:@""];
+                    [dictPrepare2Send setValue:stringModelName forKey:@"modelname"];
+                    [dictPrepare2Send setValue:watchDeviceQuery[i].cellID forKey:@"zeroitsn"];
+                    [dictPrepare2Send setValue:watchDeviceQuery[i].productVersion forKey:@"device_firmware"];
+                    [dictPrepare2Send setValue:watchDeviceQuery[i].serialNumber forKey:@"device_sn"];
+                    [dictPrepare2Send setValue:watchDeviceQuery[i].productName forKey:@"device_os_type"];
+                    [dictPrepare2Send setValue:watchDeviceQuery[i].bluetoothAddress forKey:@"device_bluetooth_address"];
+                    [dictPrepare2Send setValue:watchDeviceQuery[i].wifiAddress forKey:@"device_wifi_address"];
+                    [dictPrepare2Send setValue:watchDeviceQuery[i].createTime forKey:@"deldatetime"];
+                    // Result of erasure
+                    [dictPrepare2Send setValue:@(watchDeviceQuery[i].resultOfErasure) forKey:@"erase_status"];
+                    [dictPrepare2Send setValue:stationSN forKey:@"stationsn"];
+                    [dictPrepare2Send setValue:userName forKey:@"userid"];
+                    [dictPrepare2Send setValue:@"iwatch_eraser" forKey:@"machine_type"];
+                    [dictPrepare2Send setValue:watchDeviceQuery[i].elapsedTime forKey:@"elapsetime"];
+                    [dictPrepare2Send setValue:watchDeviceQuery[i].IMEI forKey:@"imei"];
+                    [dictPrepare2Send setValue:watchDeviceQuery[i].capacityDevice forKey:@"device_capacity"];
+                    [dictPrepare2Send setValue:watchDeviceQuery[i].carrierDevice forKey:@"device_carrier"];
+                    [dictPrepare2Send setValue:watchDeviceQuery[i].colorDevice  forKey:@"device_color"];
+
+                    
+                    NSMutableDictionary *dictResultDetail = [[NSMutableDictionary alloc]init];
+                    [dictResultDetail setValue:@3 forKey:@"Device_mode"];
+                    [dictResultDetail setValue:@-1 forKey:@"FMI_detection_method"];
+                    [dictResultDetail setValue:@(ERASE_STATUS_NA) forKey:@"erase_status"];
+                    [dictResultDetail setValue:watchDeviceQuery[i].itemID forKey:@"function_item"];
+
+                    NSError *errResultDetail;
+                    NSData *jsonDataResultDetail = [NSJSONSerialization dataWithJSONObject:dictResultDetail options:NSJSONWritingPrettyPrinted error:&errResultDetail];
+                    NSLog(@"jsonDataResultDetail = %@", [[NSString alloc] initWithData:jsonDataResultDetail encoding:NSUTF8StringEncoding]);
+                    
+                    
+                    //Mock data
+                    
+                    [dictPrepare2Send setValue:@0 forKey:@"checksum"];
+                    [dictPrepare2Send setValue:@11 forKey:@"command"];
+                    [dictPrepare2Send setValue:@0 forKey:@"credits"];
+                    [dictPrepare2Send setValue:@"N/A" forKey:@"customer_name"];
+                    [dictPrepare2Send setValue:@"N/A" forKey:@"device_baseband"];
+                    [dictPrepare2Send setValue:@"N/A" forKey:@"device_bricked"];
+                    [dictPrepare2Send setValue:@"N/A" forKey:@"device_fmip"];
+                    [dictPrepare2Send setValue:@"Apple" forKey:@"device_manufacturer"];
+                    [dictPrepare2Send setValue:@"N/A" forKey:@"device_meid"];
+                    [dictPrepare2Send setValue:@"N/A" forKey:@"device_rooted"];
+                    [dictPrepare2Send setValue:@0 forKey:@"erasableunit"];
+                    [dictPrepare2Send setValue:@"N/A" forKey:@"erase_error_code"];
+                    [dictPrepare2Send setValue:@"Reset" forKey:@"erase_method"];
+                    [dictPrepare2Send setValue:@0 forKey:@"erasedunit"];
+                    [dictPrepare2Send setValue:@"" forKey:@"errorlog"];
+                    [dictPrepare2Send setValue:@"" forKey:@"function_test"]; //???
+                    [dictPrepare2Send setValue:@1672 forKey:@"key"];
+                    [dictPrepare2Send setValue:@"N/A" forKey:@"logcontent"];
+                    [dictPrepare2Send setValue:@"N/A" forKey:@"logfileno"];
+                    [dictPrepare2Send setValue:@1 forKey:@"logfilenotsync"];
+                    [dictPrepare2Send setValue:@1 forKey:@"logid"];
+                    [dictPrepare2Send setValue:@1 forKey:@"modelsystem"];
+                    [dictPrepare2Send setValue:@"Erase" forKey:@"process_type"];
+                    [dictPrepare2Send setValue:@5 forKey:@"prversion"];
+                    [dictPrepare2Send setValue:@0 forKey:@"registeredunit"];
+                    [dictPrepare2Send setValue:[[NSString alloc] initWithData:jsonDataResultDetail encoding:NSUTF8StringEncoding] forKey:@"result_detail"]; //???
+                    [dictPrepare2Send setValue:@"N/A" forKey:@"site_name"];
+                    [dictPrepare2Send setValue:@0 forKey:@"sizeoflogfile"];
+                    [dictPrepare2Send setValue:@0 forKey:@"status"];
+                    [dictPrepare2Send setValue:@2 forKey:@"statusoflogfile"];
+                    
+                    NSError *err;
+                    NSData *jsonData = [NSJSONSerialization dataWithJSONObject:dictPrepare2Send options:NSJSONWritingPrettyPrinted error:&err];
+                    NSLog(@"JSON = %@", [[NSString alloc] initWithData:jsonData encoding:NSUTF8StringEncoding]);
+                    
+                    int sizeOfarrPushingList = arrPushingListMain.count - 1;
+                    NSLog(@"[updateDatabase] sizeOfarrPushingList: %d", sizeOfarrPushingList);
+
+                    if (sizeOfarrPushingList > 1) {
+                        int randomNumber = [self getRandomNumberBetween:0 and:sizeOfarrPushingList];
+                        linkServer = arrPushingListMain[randomNumber];
+                    } else if (sizeOfarrPushingList == 1) {
+                        linkServer = arrPushingListMain[0];
+                    }
+                        
+                        // 1 - define resource URL
+                        //http://gsitest.greystonedatatech.com/gsicloud/public/
+                    //linkServer = @"http://gsitest.greystonedatatech.com/gsicloud/public/";
+                        NSURL *URL = [NSURL URLWithString:linkServer];
+                        //2 - create AFNetwork manager
+                        AFHTTPSessionManager *manager = [[AFHTTPSessionManager alloc]initWithSessionConfiguration:[NSURLSessionConfiguration defaultSessionConfiguration]];
+                        
+                        //manager.requestSerializer = [AFJSONRequestSerializer serializer];
+                        //manager.responseSerializer.acceptableContentTypes = [NSSet setWithObject:@"text/plain"];
+                        manager.requestSerializer = [AFJSONRequestSerializer serializer];
+                        manager.responseSerializer = [AFHTTPResponseSerializer serializer];
+                        
+                        [manager.requestSerializer setValue:@"application/json" forHTTPHeaderField:@"Content-Type"];
+                        //3 - set a body
+                        //4 - create request
+                        [manager POST: URL.absoluteString
+                           parameters: dictPrepare2Send
+                             progress: nil
+                         //5 - response handling
+                              success:^(NSURLSessionDataTask * _Nonnull task, id  _Nullable responseObject) {
+                            //NSLog(@"Reply POST JSON: %@", responseObject);
+                            NSString *jsonStringResponse = [[NSString alloc] initWithData:responseObject encoding:NSUTF8StringEncoding];
+                            NSLog(@"[NSURLSessionDataTask] jsonStringResponse: %@", jsonStringResponse);
+                            
+                            NSData *data = [jsonStringResponse dataUsingEncoding:NSUTF8StringEncoding];
+                            id json = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
+                            NSLog(@"[NSURLSessionDataTask] status: %@",[json objectForKey:@"status"]);
+                            NSLog(@"[NSURLSessionDataTask] stationsn: %@",[json objectForKey:@"stationsn"]);
+                            if([json objectForKey:@"stationsn"] != nil) {
+                                NSInteger valueStatus = [[json objectForKey:@"status"] integerValue];
+                                if(valueStatus == UPDATE_STATUS_OK) {
+                                    NSLog(@"[NSURLSessionDataTask] Reply STATUS_OK");
+\
+                                    dispatch_async(queue, ^{
+                                        @autoreleasepool {
+                                            @try {
+                                                RLMRealm *realm = [RLMRealm defaultRealm];
+                                                deviceInfoNeed2Send = [realm resolveThreadSafeReference:deviceInfoNeed2SendRef];
+                                                if (!deviceInfoNeed2Send) {
+                                                    return;
+                                                }
+                                                if(![realm inWriteTransaction]) {
+                                                    [realm transactionWithBlock:^{
+                                                        deviceInfoNeed2Send.eraseVerify =  VERIFY_DONE;
+                                                        if(deviceInfoNeed2Send.resultOfErasure == RESULT_PASSED) {
+                                                            //[DeviceInfo createOrUpdateInRealm:realm withValue:@{@"eraseVerify": @(VERIFY_DONE), @"eraseStatus": @(ERASE_STATUS_PASSED)}];
+                                                            deviceInfoNeed2Send.eraseStatus = @(ERASE_STATUS_PASSED);
+                                                        } else {
+                                                            //[DeviceInfo createOrUpdateInRealm:realm withValue:@{@"eraseVerify": @(VERIFY_DONE), @"eraseStatus": @(ERASE_STATUS_FAILED)}];
+                                                            deviceInfoNeed2Send.eraseStatus = @(ERASE_STATUS_FAILED);
+                                                        }
+                                                    }];
+                                                }
+                                            }
+                                            @catch (NSException *exception) {
+                                              NSLog(@"[NSURLSessionDataTask] Reply NSException exception.reason: %@", exception.reason);
+                                            }
+                                            @finally {
+                                              NSLog(@"[NSURLSessionDataTask] Reply Finally condition");
+                                            }
+                                        }
+                                    });
+                                }
+                            } else {
+                                NSLog(@"[NSURLSessionDataTask] Reply Couldn't parse status");
+                            }
+                        }
+                              failure:^(NSURLSessionDataTask * _Nullable task, NSError * _Nonnull error) {
+                            NSLog(@"[NSURLSessionDataTask] Reply error: %@", error);
+                        }
+                        ];
+                    sleep(5);
+
+                    //                //Create a Base64 Encoded NSString Object
+                    //                 NSData *nsdata = [[[NSString alloc] initWithData:jsonData encoding:NSUTF8StringEncoding] dataUsingEncoding:NSUTF8StringEncoding];
+                    //
+                    //                 // Get NSString from NSData object in Base64
+                    //                 NSString *base64Encoded = [nsdata base64EncodedStringWithOptions:0];
+                    //                 // Print the Base64 encoded string
+                    //                 NSLog(@"Encoded: %@", base64Encoded);
+                    
+                    
+                }
+            }
+            // du tinh cell update info thanh cong moi cho finished , khi finished se co 1 thoi gian khong doc duoc thong tin
+        }
+    }
+    
+    //detect: hien tai khong detect dcuoc khi device dag xoa, khi dang xoa thong tin doc dc giong recovery mode, neu doc thuong xuyen se xoa failed,
+    //khi finished van chua doc duoc thong tin 1 thoi gian cho toi khi doc duoc day du thog tin
+
+    // remove device unplug
+    numDevice = (int)arrDevice.count;
+   // [15]    (null)    @"ProccessUSB" : (no summary)
+//    for (int i=0; i<numDevice; i++)
+//    {
+        
+    
+//    }
+//    for(int i=0;i<arrDatabaseCell.count;i++)
+//    {
+//        dicCell = [arrDatabaseCell objectAtIndex:i];
+//        NSString *UniqueDeviceID = [dicCell objectForKey:@"UniqueDeviceID"];
+//        NSLog(@"%s QT debug status:%d, UniqueDeviceID: %@",__func__,[[dicCell objectForKey:@"status"] intValue],UniqueDeviceID);
+//        if([[dicCell objectForKey:@"status"] intValue] != CellNoDevice) // reset cell
+//        {
+//
+//            if(UniqueDeviceID.length<2)
+//            {
+//                [self removeDevice:i];// reset lai info
+//                mustReload = 1;
+//            }
+//        }
+//
+//
+//        if([[dicCell objectForKey:@"status"] intValue] == CellHaveDevice
+//           || [[dicCell objectForKey:@"status"] intValue] == CellReady
+//           || [[dicCell objectForKey:@"status"] intValue] == CellFinished) // reset cell
+//        {
+//            NSLog(@"status: %d, checkInfoFlag:%d",[[dicCell objectForKey:@"status"] intValue],checkInfoFlag)
+//            if([[dicCell  objectForKey:@"update_info"] intValue] != checkInfoFlag)
+//            {
+//                [self removeDevice:i];// reset lai info
+//                mustReload = 1;
+//            }
+//        }
+//
+//    }
+   
+    dispatch_async(dispatch_get_main_queue(), ^{
+        NSAttributedString * attrStr = [self showProccessed:[self countProccessed]];
+        self->lbProcessed.attributedStringValue = attrStr;
+    });
+    
+    NSLog(@"%s arrDatabaseCell: %@",__func__,arrDatabaseCell);
+   // return 1;
+    return mustReload;
+   /*
+    libusb:
+    (
+            {
+            "bcd_device" = 0x0304;
+            manufacturer = "Apple Inc.";
+            path = "3.1";// chi ra vi tri
+            pid = 4783;
+            product = Watch;
+            serialnumber = 141243b7d4dcd59a94e95545492e6284cec7558e;
+            vid = 1452;
+        }
+    )
+    
+    cell:{
+    [NSNumber numberWithInt:j],@"row",
+    [NSNumber numberWithInt:i],@"col",
+    title, @"title",
+    @"No device", @"conten",
+    options,@"info",
+    }
+    */
+    /*
+     object:{
+         col = 0;
+         conten = "iWatch Type:Watch3,4\nSerial :FHLVJ320J5X5\nPath:3.1";
+         info =     {
+             ActivationState = Unactivated;
+             BasebandStatus = NoTelephonyCapabilty;
+             BluetoothAddress = "68:ab:1e:03:68:e7";
+             BoardId = 26;
+             BrickState = 1;
+             BuildVersion = 19R570;
+             CPUArchitecture = armv7k;
+             ChipID = 32772;
+             DeviceClass = Watch;
+             DeviceColor = 1;
+             DeviceName = "Apple Watch";
+             DieID = 1976424373755686;
+             EthernetAddress = "68:ab:1e:03:69:18";
+             FirmwareVersion = "iBoot-7429.40.94";
+             HardwareModel = N121bAP;
+             HardwarePlatform = t8004;
+             HostAttached = 1;
+             MLBSerialNumber = FN673930880J0Y342;
+             ModelNumber = MQL22;
+             NonVolatileRAM =         {
+                 "auto-boot" = {length = 4, bytes = 0x74727565};
+                 "backlight-level" = {length = 3, bytes = 0x353837};
+                 "backlight-nits" = {length = 10, bytes = 0x30783031323732656438};
+                 "boot-args" = "";
+                 bootdelay = {length = 1, bytes = 0x30};
+                 "com.apple.System.tz0-size" = {length = 8, bytes = 0x3078363030303030};
+                 "device-material" = {length = 192, bytes = 0x30313030 30303030 30303030 30303030 ... 30343030 30303030 };
+                 "oblit-begins" = {length = 88, bytes = 0x4f626c69 74547970 653a204f 626c6974 ... 70702f53 65747570 };
+                 obliteration = {length = 38, bytes = 0x68616e64 6c655f6d 65737361 67653a20 ... 6f6d706c 6574650a };
+             };
+             PairRecordProtectionClass = 4;
+             PartitionType = "GUID_partition_scheme";
+             PasswordProtected = 0;
+             ProductName = "Watch OS";
+             ProductType = "Watch3,4";
+             ProductVersion = "8.1";
+             ProductionSOC = 1;
+             ProtocolVersion = 2;
+             RegionInfo = "ZP/A";
+             SerialNumber = FHLVJ320J5X5;
+             SoftwareBehavior = {length = 16, bytes = 0x01000000000000000000000000000000};
+             SoftwareBundleVersion = "";
+             SupportedDeviceFamilies =         (
+                 4
+             );
+             TelephonyCapability = 0;
+             TimeIntervalSince1970 = "39901.883138";
+             TimeZone = "US/Pacific";
+             TimeZoneOffsetFromUTC = "-28800";
+             TrustedHostAttached = 1;
+             UniqueChipID = 1976424373755686;
+             UniqueDeviceID = 141243b7d4dcd59a94e95545492e6284cec7558e;
+             UseRaptorCerts = 1;
+             Uses24HourClock = 0;
+             WiFiAddress = "68:ab:1e:03:69:17";
+         };
+         row = 0;
+         status = 0;
+         title = A1;
+     }
+     
+     */
+    
+}
+
+-(void)settextToCell:(NSInteger)col row:(NSInteger)row text:(NSString*)str
+{
+    CellTableClass *cellView = (CellTableClass*)[self->tableView viewAtColumn:col row:row makeIfNecessary:YES];
+    NSData *data = [str dataUsingEncoding:NSUTF8StringEncoding];
+    NSAttributedString *attributedString = [[NSAttributedString alloc] initWithHTML:data baseURL:nil documentAttributes:nil];
+    [[cellView.tvInfoDevice textStorage] setAttributedString:attributedString];
+    cellView.tvInfoDevice.font = [NSFont fontWithName:@"Roboto-Regular" size:22];
+
+}
+-(void)setImageToCell:(NSInteger)col row:(NSInteger)row imageName:(NSString*)strImage
+{
+    CellTableClass *cellView = (CellTableClass*)[self->tableView viewAtColumn:col row:row makeIfNecessary:YES];
+    cellView.imgResult.image = [NSImage imageNamed:strImage];
+}
+//- (void) resetAllLed:(NSMutableArray*)arrboard
+//{
+//    NSLog(@"array board: %@",arrboard);
+//    for(int i=0;i<arrboard.count;i++)
+//    {
+//        NSMutableDictionary *dic = [arrboard objectAtIndex:i];
+//        ProtocolHW *pro = [dic objectForKey:@"ProtocolHW"];
+//        Byte arr[8]= {LED_OFF, LED_OFF, LED_OFF, LED_OFF, LED_OFF,LED_OFF,LED_OFF,LED_OFF};
+//        NSString *UniqueDeviceID = [dic objectForKey:@"UniqueDeviceID"];
+//        [pro ledControl:UniqueDeviceID ledArr:arr];
+//    }
+//}
+- (void) setResult:(int)result dic:(NSMutableDictionary *)dicCell
+{
+    [dicCell setObject:[NSNumber numberWithInt:result] forKey:@"result"];//1 passed,0 failed
+    [dicCell setObject:[NSNumber numberWithInt:CellFinished] forKey:@"status"];
+    NSString *title = [dicCell objectForKey:@"title"];
+    if(result == 1) //passed
+        [self setLedOnBoardOfCell:title color:LED_GREEN_BLINK];
+    else [self setLedOnBoardOfCell:title color:LED_RED_BLINK];
+}
+
+- (void) removeDevice:(int)vt
+{
+    NSMutableDictionary *dicCell = [arrDatabaseCell objectAtIndex:vt];
+    NSMutableDictionary *options = [[NSMutableDictionary alloc] init];
+    [dicCell setObject:options forKey:@"info"];
+   // [dicCell setObject:@"<p style=\"font-family:'Roboto-Regular';font-size:16px\">No device</p>" forKey:@"conten"];
+    [dicCell setObject:@"No device" forKey:@"conten"];
+    [dicCell setObject:[NSNumber numberWithInt:0] forKey:@"update_info"];
+    [dicCell setObject:@"" forKey:@"UniqueDeviceID"];
+//    [dicCell setObject:[NSNumber numberWithInt:CellNoDevice] forKey:@"status"];
+    [dicCell setObject:[NSNumber numberWithInt:0] forKey:@"result"];
+    [dicCell setObject:[NSNumber numberWithInt:0] forKey:@"TimeProccess"];
+    [dicCell setObject:@"00:00:00" forKey:@"elapsedTime"];
+
+    [dicCell setObject:[NSNumber numberWithInt:0] forKey:@"InfoUpdated"];
+    [dicCell setObject:[NSNumber numberWithInt:0] forKey:@"index"];
+    [dicCell setObject:[NSNumber numberWithInt:0] forKey:@"counterTrust"];
+    [dicCell setObject:@"nil" forKey:@"itemID"];
+    [dicCell setObject:@"N/A" forKey:@"color_device"];
+    [dicCell setObject:@"N/A" forKey:@"capacity_device"];
+    [dicCell setObject:@"N/A" forKey:@"carrier_device"];
+
+    [dicCell setObject:@"" forKey:@"note"];
+    [arrDatabaseCell replaceObjectAtIndex:vt withObject:dicCell];
+    NSString *title = [dicCell objectForKey:@"title"];
+    NSLog(@"Quyen:%@",[dicCell objectForKey:@"status"]);
+    [self setLedOnBoardOfCell:title color:LED_OFF];
+    [tableView performSelectorOnMainThread:@selector(reloadData) withObject:nil waitUntilDone:NO];
+    [dicCell setObject:[NSNumber numberWithInt:CellNoDevice] forKey:@"status"];
+      
+}
+
+-(void)drawHeader:(NSRect)rect
+{
+    AppDelegate *delegate = (AppDelegate *)[[NSApplication sharedApplication] delegate];
+    NSView *viewHeader = [[NSView alloc] initWithFrame:rect];
+    viewHeader.wantsLayer = YES;
+    viewHeader.layer.backgroundColor = delegate.colorBanner.CGColor;
+    [self.view addSubview:viewHeader];
+    // chua lam
+    
+    NSTextField *txtHeader = [[NSTextField alloc] initWithFrame:NSMakeRect(10, 0, rect.size.width/2, 50)];
+    txtHeader.alignment = NSTextAlignmentLeft;
+    txtHeader.cell = [[UITextFieldCell alloc] init];
+    txtHeader.stringValue = @"iWatch Eraser";
+    [txtHeader setEditable:NO];
+    txtHeader.backgroundColor = [NSColor clearColor];
+    txtHeader.font = [NSFont boldSystemFontOfSize:20];
+    txtHeader.drawsBackground = YES;
+    txtHeader.textColor = [NSColor whiteColor];
+    [viewHeader addSubview:txtHeader];
+    
+    
+    NSButton *btLogout = [[NSButton alloc] initWithFrame:NSMakeRect(rect.size.width - 200,5, 190, 40)];
+    btLogout.image = [NSImage imageNamed:@"user.png"];
+    btLogout.imagePosition = NSImageLeft;
+    btLogout.imageScaling = NSImageScaleProportionallyUpOrDown;
+    btLogout.title = [NSString stringWithFormat:@" %@",delegate.userName];
+    btLogout.alignment = NSTextAlignmentLeft;
+    [btLogout.cell setBackgroundColor:delegate.colorBanner];
+    NSMutableAttributedString *atribute = [delegate setColorTitleFor:btLogout color:[NSColor whiteColor] size:18];
+    [btLogout setAttributedTitle:atribute];
+    btLogout.layer.borderWidth = 0.0;
+    btLogout.layer.cornerRadius = 4.0;
+    btLogout.wantsLayer = YES;
+    [btLogout setToolTip:@"Logout"];
+    btLogout.bordered = NO;
+    [btLogout setTarget:self];
+    [btLogout setAction:@selector(btLogoutClick:)];
+    [viewHeader addSubview:btLogout];
+    
+    [viewHeader setNeedsDisplay:YES];
+}
+-(void)drawFooter:(NSRect)rect
+{
+    NSView *viewFooter = [[NSView alloc] initWithFrame:rect];
+    viewFooter.wantsLayer = YES;
+    viewFooter.layer.backgroundColor = [NSColor colorWithRed:0xDA*1.0/255 green:0xDA*1.0/255 blue:0xDA*1.0/255 alpha:1.0].CGColor;
+    [self.view addSubview:viewFooter];
+    
+    NSButton *btLogout = [[NSButton alloc] initWithFrame:NSMakeRect(rect.size.width - 110,5, 100, 40)];
+    btLogout.image = [NSImage imageNamed:@"logout.png"];
+    btLogout.imagePosition = NSImageLeft;
+    btLogout.imageScaling = NSImageScaleProportionallyUpOrDown;
+    btLogout.title = @"Logout";
+    btLogout.layer.borderColor = [NSColor blackColor].CGColor;
+    btLogout.layer.borderWidth = 1.0;
+    btLogout.layer.cornerRadius = 4.0;
+    btLogout.hidden = YES;
+    [btLogout setToolTip:@"Logout"];
+    [btLogout setTarget:self];
+    [btLogout setAction:@selector(btLogoutClick:)];
+    [viewFooter addSubview:btLogout];
+    
+    int fontsize = 18;
+    
+    lbConnectGCSLabel = [[NSTextField alloc] initWithFrame:NSMakeRect(10,10, 400, 25)];
+    lbConnectGCSLabel.alignment = NSTextAlignmentLeft;
+    lbConnectGCSLabel.cell = [[NSTextFieldCell alloc] init];
+    lbConnectGCSLabel.font = [NSFont fontWithName:@"HelveticaNeue" size:fontsize];
+    lbConnectGCSLabel.stringValue = @"The connection to GCS Server established...";
+//    lbConnectGCSLabel.font = [NSFont systemFontOfSize:fontsize];
+    [lbConnectGCSLabel setEditable:NO];
+    lbConnectGCSLabel.backgroundColor = [NSColor clearColor];
+    lbConnectGCSLabel.drawsBackground = NO;
+    lbConnectGCSLabel.bordered = NO;
+    lbConnectGCSLabel.textColor = [NSColor blackColor];
+    [viewFooter addSubview:lbConnectGCSLabel];
+    
+    //numDevice = 0;
+    
+    
+    NSAttributedString * attrStr = [self showProccessed:[self countProccessed]];
+    
+    lbProcessed = [[NSTextField alloc] initWithFrame:NSMakeRect(rect.size.width/2-100,18, 200, 25)];
+    lbProcessed.alignment = NSTextAlignmentCenter;
+//    lbProcessed.cell = [[UITextFieldCell alloc] init];
+//    lbProcessed.font = [NSFont systemFontOfSize:fontsize];
+    lbProcessed.cell = [[NSTextFieldCell alloc] init];
+    lbProcessed.font = [NSFont fontWithName:@"HelveticaNeue" size:fontsize];
+    lbProcessed.attributedStringValue = attrStr;
+    [lbProcessed setEditable:NO];
+    lbProcessed.backgroundColor = [NSColor clearColor];
+    lbProcessed.drawsBackground = NO;
+    lbProcessed.bordered = NO;
+    lbProcessed.textColor = [NSColor blackColor];
+    [viewFooter addSubview:lbProcessed];
+    
+    
+    
+    AppDelegate *delegate = (AppDelegate *)[[NSApplication sharedApplication] delegate];
+    NSButton *btStation = [[NSButton alloc] initWithFrame:NSMakeRect(rect.size.width-535,5, 530, 40)];
+    btStation.title = [NSString stringWithFormat:@"[iWatch Eraser Station] - [%@] - [%@]",delegate.mMacAddress,VERSION];
+    btStation.font = [NSFont fontWithName:@"Roboto-Medium" size:fontsize];//[NSFont systemFontOfSize:fontsize];
+    NSMutableAttributedString *colorTitle = [[NSMutableAttributedString alloc] initWithAttributedString:[btStation attributedTitle]];
+        NSRange titleRange = NSMakeRange(0, [colorTitle length]);
+    [colorTitle addAttribute:NSForegroundColorAttributeName value:[NSColor colorWithRed:67.0/255 green:155.0/255 blue:71.0/255 alpha:1.0] range:titleRange];
+    [btStation setAttributedTitle:colorTitle];
+    btStation.wantsLayer = YES;
+    btStation.layer.borderWidth = 2.0;
+    btStation.layer.borderColor = [NSColor colorWithRed:67.0/255 green:155.0/255 blue:71.0/255 alpha:1.0].CGColor;
+    btStation.layer.cornerRadius = 4.0;
+    [btStation setToolTip:@"Station"];
+    [btStation setTarget:self];
+    [btStation setAction:@selector(btStationClick:)];
+    [viewFooter addSubview:btStation];
+}
+- (int)countProccessed
+{
+    int count = 0;
+    for (int i=0; i<arrDatabaseCell.count; i++)
+    {
+        NSMutableDictionary *dic = (NSMutableDictionary *)[arrDatabaseCell objectAtIndex:i];
+        if([[dic objectForKey:@"status"] intValue] == CellFinished)
+        {
+            count++;
+        }
+    }
+    return count;
+}
+
+-(NSAttributedString *)showProccessed:(int)numDevice
+{
+    int fontsize = 18;
+    NSString * htmlString = [NSString stringWithFormat:@"<html><body><span style='font-size:%dpx'>Processed </span><span style='font-size:%dpx'><b>%d</b></span><span style='font-size:%dpx'> device</span></body></html>",fontsize,fontsize+4,numDevice,fontsize];
+    NSAttributedString * attrStr = [[NSAttributedString alloc] initWithData:[htmlString dataUsingEncoding:NSUnicodeStringEncoding] options:@{ NSDocumentTypeDocumentAttribute: NSHTMLTextDocumentType } documentAttributes:nil error:nil];
+    return attrStr;
+}
+-(void)drawConten:(NSRect)rect
+{
+    NSColor *colorCFBG = [NSColor colorWithRed:245.0/255 green:245.0/255 blue:245.0/255 alpha:1.0];
+    NSView *viewConten = [[NSView alloc] initWithFrame:rect];
+    viewConten.wantsLayer = YES;
+    viewConten.layer.backgroundColor = [NSColor brownColor].CGColor;
+    [self.view addSubview:viewConten];
+//    ======================================================================list button right========================================
+    int configWidth = 300;
+    
+    // viewConfig
+   
+    NSView *viewConfig = [[NSView alloc] initWithFrame:NSMakeRect(rect.size.width - configWidth, 0, configWidth, rect.size.height)];
+    viewConfig.wantsLayer = YES;
+    viewConfig.layer.backgroundColor = colorCFBG.CGColor;
+    [viewConten addSubview:viewConfig];
+   
+    int spaceUpper2MainView = 30;
+    int spaceUpperDefault = 50;
+    NSImageView *imageLogo = [[NSImageView alloc] initWithFrame:NSMakeRect((configWidth - 180)/2 , rect.size.height - 170 - spaceUpper2MainView, 180, 170)];
+    imageLogo.image = [NSImage imageNamed:@"logoLeft"];
+    [viewConfig addSubview:imageLogo];
+    
+    //    ======================================== group Item ID input
+    NSView *groupBoxItemIDInput =[[NSView alloc] initWithFrame:NSMakeRect((configWidth - 280)/2 , rect.size.height - imageLogo.frame.size.height - spaceUpperDefault - 80, 280, 80)];
+    groupBoxItemIDInput.wantsLayer = YES;
+    groupBoxItemIDInput.layer.borderWidth = 0;
+    groupBoxItemIDInput.layer.borderColor = [NSColor colorWithRed:200.0/255 green:200.0/255 blue:200.0/255 alpha:1.0].CGColor;
+    groupBoxItemIDInput.layer.backgroundColor =[NSColor clearColor].CGColor;
+    [viewConfig addSubview:groupBoxItemIDInput];
+    
+    NSTextField *lbItemID = [[NSTextField alloc] initWithFrame:NSMakeRect(0, groupBoxItemIDInput.frame.size.height - 2*groupBoxItemIDInput.frame.size.height/3, 100, 30)];
+    lbItemID.alignment = NSTextAlignmentCenter;
+    lbItemID.cell = [[UITextFieldCell alloc] init];
+    lbItemID.stringValue = @"Item ID";
+    [lbItemID setEditable:NO];
+    lbItemID.font = [NSFont fontWithName:@"Roboto-Regular" size:16];
+    lbItemID.backgroundColor = colorCFBG;
+    lbItemID.drawsBackground = YES;
+    lbItemID.textColor = [NSColor blackColor];
+    [groupBoxItemIDInput addSubview:lbItemID];
+    
+    txtItemID = [[UITextField alloc] initWithFrame:NSMakeRect((configWidth - 180)/2, groupBoxItemIDInput.frame.size.height - 2*groupBoxItemIDInput.frame.size.height/3, groupBoxItemIDInput.frame.size.width - 80, groupBoxItemIDInput.frame.size.height/3)];
+    txtItemID.cell = [[NSTextFieldCell alloc] init];
+    
+    [groupBoxItemIDInput addSubview:txtItemID];
+    [txtItemID.cell setFocusRingType:NSFocusRingTypeNone];
+    txtItemID.alignment = NSTextAlignmentLeft;
+    txtItemID.font = [NSFont fontWithName:@"Roboto-Regular" size:16];
+    //txtUserName.font = [NSFont controlContentFontOfSize:25];//[NSFont fontWithName:@"Roboto-Light" size:25];//
+    txtItemID.bordered = YES;
+    txtItemID.wantsLayer = YES;
+    txtItemID.layer.borderColor = [NSColor blackColor].CGColor;
+    txtItemID.editable = YES;
+    txtItemID.backgroundColor = [NSColor redColor];
+    txtItemID.layer.cornerRadius = 5;
+    txtItemID.layer.borderWidth = 1;
+    txtItemID.layer.backgroundColor = [NSColor whiteColor].CGColor;
+    txtItemID.stringValue = @"";
+    txtItemID.delegate = self;
+
+
+
+    
+    lbPleaseScanItemID = [[NSTextField alloc] initWithFrame:NSMakeRect((configWidth - 180)/2, groupBoxItemIDInput.frame.size.height - 3*groupBoxItemIDInput.frame.size.height/3, groupBoxItemIDInput.frame.size.width - 80, 30)];
+    lbPleaseScanItemID.alignment = NSTextAlignmentCenter;
+    lbPleaseScanItemID.cell = [[UITextFieldCell alloc] init];
+    lbPleaseScanItemID.stringValue = @"Please scan Item ID!";
+    [lbPleaseScanItemID setEditable:NO];
+    lbPleaseScanItemID.font = [NSFont fontWithName:@"Roboto-Regular" size:16];
+    lbPleaseScanItemID.backgroundColor = colorCFBG;
+    lbPleaseScanItemID.drawsBackground = YES;
+    lbPleaseScanItemID.textColor = [NSColor redColor];
+    lbPleaseScanItemID.alignment = NSTextAlignmentCenter;
+    [groupBoxItemIDInput addSubview:lbPleaseScanItemID];
+    
+    
+    
+    
+    //    ======================================== group Print label
+    int yCoordinateGBPrintLabel = rect.size.height - spaceUpper2MainView - imageLogo.frame.size.height - spaceUpperDefault - groupBoxItemIDInput.frame.size.height - 120;
+    NSView *groupBoxPrintLabel =[[NSView alloc] initWithFrame:NSMakeRect((configWidth - 280)/2 , yCoordinateGBPrintLabel, 280, 120)];
+    groupBoxPrintLabel.wantsLayer = YES;
+    groupBoxPrintLabel.layer.borderWidth = 1;
+    groupBoxPrintLabel.layer.borderColor = [NSColor colorWithRed:200.0/255 green:200.0/255 blue:200.0/255 alpha:1.0].CGColor;
+    groupBoxPrintLabel.layer.backgroundColor =[NSColor clearColor].CGColor;
+    [viewConfig addSubview:groupBoxPrintLabel];
+
+    NSTextField *txtHeaderGroupPrintLabel = [[NSTextField alloc] initWithFrame:NSMakeRect((configWidth - 280), yCoordinateGBPrintLabel + 120 - 30/3, 100, 30)];
+    txtHeaderGroupPrintLabel.alignment = NSTextAlignmentCenter;
+
+    txtHeaderGroupPrintLabel.cell = [[UITextFieldCell alloc] init];
+    txtHeaderGroupPrintLabel.stringValue = @"   Print label";
+    [txtHeaderGroupPrintLabel setEditable:NO];
+    txtHeaderGroupPrintLabel.font = [NSFont fontWithName:@"Roboto-Regular" size:16];
+    txtHeaderGroupPrintLabel.backgroundColor = colorCFBG;
+    txtHeaderGroupPrintLabel.drawsBackground = YES;
+    txtHeaderGroupPrintLabel.textColor = [NSColor blackColor];
+    [viewConfig addSubview:txtHeaderGroupPrintLabel];
+    
+
+
+//      AppDelegate *delegate = (AppDelegate *)[[NSApplication sharedApplication] delegate];
+//    NSMutableAttributedString *atribute;// = [delegate setColorTitleFor:btPrintLabel color:[NSColor blackColor] size:18];
+//    NSButton *btPrintLabel = [[NSButton alloc] initWithFrame:NSMakeRect(50,40, 180, 40)];
+//    btPrintLabel.title = @"Print Label";
+//    [btPrintLabel setAttributedTitle:atribute];
+//    btPrintLabel.wantsLayer = YES;
+//    btPrintLabel.layer.borderWidth = 1.0;
+//    btPrintLabel.layer.borderColor = [NSColor colorWithRed:200.0/255 green:200.0/255 blue:200.0/255 alpha:1.0].CGColor;
+//    btPrintLabel.layer.cornerRadius = 4.0;
+//    [btPrintLabel setToolTip:@"Print Label"];
+//    [btPrintLabel setTarget:self];
+//    [btPrintLabel setAction:@selector(btPrintLabeltClick:)];
+//    [groupBoxPrintLabel addSubview:btPrintLabel];
+
+    UIButton *btPrintLabel = [[UIButton alloc] initWithFrame:NSMakeRect(40, 38, 200, 44)];
+    btPrintLabel.title = @"";
+    [[btPrintLabel cell] setBackgroundColor:colorCFBG];
+    [btPrintLabel setImage:[NSImage imageNamed:@"bt_print_label_normal.png"]];
+//    [btPrintLabel setButtonImage:[NSImage imageNamed:@"bt_print_label_normal"] forState:UIControlStateNormal];
+//    [btPrintLabel setButtonImage:[NSImage imageNamed:@"bt_print_label_press"] forState:UIControlStatePress];
+//    [btPrintLabel setButtonImage:[NSImage imageNamed:@"bt_print_label_disable"] forState:UIControlStateDisabled];
+    [btPrintLabel sizeToFit];
+    btPrintLabel.layer.cornerRadius = 10;
+    [btPrintLabel setBordered:NO];
+    [btPrintLabel setToolTip:@"Print Label"];
+    [btPrintLabel setTarget:self];
+    [btPrintLabel setAction:@selector(btPrintLabeltClick:)];
+    [groupBoxPrintLabel addSubview:btPrintLabel];
+
+
+
+    //    ======================================== group toosl
+    int mHeightTool = rect.size.height - spaceUpper2MainView - imageLogo.frame.size.height - spaceUpperDefault - groupBoxItemIDInput.frame.size.height - spaceUpperDefault - groupBoxPrintLabel.frame.size.height;
+    int yCoordinate = rect.size.height - spaceUpper2MainView/2 - imageLogo.frame.size.height - spaceUpperDefault - groupBoxItemIDInput.frame.size.height - spaceUpperDefault - groupBoxPrintLabel.frame.size.height - mHeightTool;
+    NSView *groupBoxTool =[[NSView alloc] initWithFrame:NSMakeRect((configWidth - 280)/2, yCoordinate, 280, mHeightTool)];
+    groupBoxTool.wantsLayer = YES;
+    groupBoxTool.layer.borderWidth = 1;
+    groupBoxTool.layer.borderColor = [NSColor colorWithRed:200.0/255 green:200.0/255 blue:200.0/255 alpha:1.0].CGColor;
+    groupBoxTool.layer.backgroundColor =[NSColor clearColor].CGColor;
+   // [viewConfig addSubview:groupBoxTool];
+
+    NSTextField *txtHeaderGroupTool = [[NSTextField alloc] initWithFrame:NSMakeRect((configWidth - 280), yCoordinate + mHeightTool - 30/3, 60, 30)];
+    txtHeaderGroupTool.alignment = NSTextAlignmentCenter;
+    txtHeaderGroupTool.cell = [[UITextFieldCell alloc] init];
+    txtHeaderGroupTool.stringValue = @"   Tools";
+    [txtHeaderGroupTool setEditable:NO];
+    txtHeaderGroupTool.font = [NSFont fontWithName:@"Roboto-Regular" size:16];
+    txtHeaderGroupTool.backgroundColor = colorCFBG;
+    txtHeaderGroupTool.drawsBackground = YES;
+    txtHeaderGroupTool.textColor = [NSColor blackColor];
+   // [viewConfig addSubview:txtHeaderGroupTool];
+
+
+
+
+    UIButton *btEraseAll = [[UIButton alloc] initWithFrame:NSMakeRect(40, mHeightTool - 80, 200, 44)];
+    btEraseAll.title = @"";
+    [[btEraseAll cell] setBackgroundColor:colorCFBG];
+    [btEraseAll setImage:[NSImage imageNamed:@"bt_eraseall_normal.png"]];
+    [btEraseAll sizeToFit];
+    btEraseAll.layer.cornerRadius = 10;
+    [btEraseAll setBordered:NO];
+    [btEraseAll setToolTip:@"Erase all"];
+    [btEraseAll setTarget:self];
+    [btEraseAll setAction:@selector(btEraseAllClick:)];
+    [groupBoxTool addSubview:btEraseAll];
+
+
+    UIButton *btStopAll = [[UIButton alloc] initWithFrame:NSMakeRect(40, mHeightTool - 150, 200, 44)];
+    btStopAll.title = @"";
+    [[btStopAll cell] setBackgroundColor:colorCFBG];
+    [btStopAll setImage:[NSImage imageNamed:@"bt_stopall_normal.png"]];
+    [btStopAll sizeToFit];
+    btStopAll.layer.cornerRadius = 10;
+    [btStopAll setBordered:NO];
+    [btStopAll setToolTip:@"Stop all"];
+    [btStopAll setTarget:self];
+    [btStopAll setAction:@selector(btStopAllClick:)];
+    [groupBoxTool addSubview:btStopAll];
+
+
+    UIButton *btRescan = [[UIButton alloc] initWithFrame:NSMakeRect(40, mHeightTool - 220, 200, 44)];
+    btRescan.title = @"";
+    [[btRescan cell] setBackgroundColor:colorCFBG];
+    [btRescan setImage:[NSImage imageNamed:@"bt_rescan_device_normal.png"]];
+    [btRescan sizeToFit];
+    btRescan.layer.cornerRadius = 10;
+    [btRescan setBordered:NO];
+    [btRescan setToolTip:@"Rescan device"];
+    [btRescan setTarget:self];
+    [btRescan setAction:@selector(btRescanClick:)];
+    [groupBoxTool addSubview:btRescan];
+
+
+    UIButton *btReports = [[UIButton alloc] initWithFrame:NSMakeRect(40, mHeightTool - 290, 200, 44)];
+    btReports.title = @"";
+    [[btReports cell] setBackgroundColor:colorCFBG];
+    [btReports setImage:[NSImage imageNamed:@"bt_report_normal.png"]];
+    [btReports sizeToFit];
+    btReports.layer.cornerRadius = 10;
+    [btReports setBordered:NO];
+    [btReports setToolTip:@"Reports"];
+    [btReports setTarget:self];
+    [btReports setAction:@selector(btReportsClick:)];
+    [groupBoxTool addSubview:btReports];
+    
+//    ======================================================================Table View========================================
+   //viewData
+    int dWidth = rect.size.width - configWidth,dHeight = rect.size.height;
+    NSView *viewData = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, dWidth, dHeight)];
+    viewData.wantsLayer = YES;
+    viewData.layer.backgroundColor = colorCFBG.CGColor;//[NSColor greenColor].CGColor;
+    [viewConten addSubview:viewData];
+    
+    if(libusb == nil)
+        libusb = [[ProccessUSB alloc] init];
+    NSMutableArray *sortedArray = [libusb getListModule];
+    NSLog(@"%s arrayBoard:%@",__func__,sortedArray);
+    if(sortedArray.count == 0)
+    {
+        NSAlert *alert = [NSAlert alertWithMessageText:@"iWatch Alert" defaultButton:@"Close" alternateButton:nil otherButton:nil informativeTextWithFormat:@"Module not found"];
+        [alert runModal];
+    }
+    
+    
+    
+//    for (int i = 0; i < sortedArray.count; i++)
+//    {
+//        // reset led
+//        NSMutableDictionary *dic = (NSMutableDictionary *)sortedArray[i];
+//        ProtocolHW *pro = [[ProtocolHW alloc] init];
+//        NSString *UniqueDeviceID = [dic objectForKey:@"UniqueDeviceID"];
+//        NSDictionary *version = [pro checkVersion:UniqueDeviceID];
+//
+//        Byte arr[8]= {LED_OFF, LED_OFF, LED_OFF, LED_OFF, LED_OFF,LED_OFF,LED_OFF,LED_OFF};
+//        [pro ledControl:UniqueDeviceID ledArr:arr];
+//
+//        [dic setObject:version forKey:@"VersionHW"];
+//        NSThread *myThread = [[NSThread alloc] initWithTarget:pro selector:@selector(startCheckButton:) object:UniqueDeviceID];
+//        [myThread start];
+//        [dic setObject:pro forKey:@"ProtocolHW"];
+//        [sortedArray replaceObjectAtIndex:i withObject:dic];
+//    }
+    //
+    NSLog(@"%s sortedArray Board:%@",__func__,sortedArray);
+    
+    NSSortDescriptor *sortDescriptor;
+    sortDescriptor = [[NSSortDescriptor alloc] initWithKey:@"path" ascending:YES];
+    arrayBoard = [[sortedArray sortedArrayUsingDescriptors:@[sortDescriptor]] mutableCopy];
+    // add them protocol port COM
+//    for (int i = 0; i < arrayBoard.count; i++)
+//    {
+//        NSMutableDictionary *dic = (NSMutableDictionary *)arrayBoard[i];
+//        ProtocolHW *pro = [[ProtocolHW alloc] init];
+//        NSString *UniqueDeviceID = [dic objectForKey:@"UniqueDeviceID"];
+//        NSDictionary *version = [pro checkVersion:UniqueDeviceID];
+//        if(version==nil)
+//        {
+//            [pro closeSerialPort];
+//            version = [pro checkVersion:UniqueDeviceID];
+//        }
+//        if(version!=nil)
+//        {
+//            version = [NSDictionary dictionary];
+//            [dic setObject:version forKey:@"VersionHW"];
+//        }
+//
+//        Byte arr[8]= {LED_OFF, LED_OFF, LED_OFF, LED_OFF, LED_OFF,LED_OFF,LED_OFF,LED_OFF};
+//        [pro ledControl:UniqueDeviceID ledArr:arr];
+//
+//        // start get event button on board
+//        NSThread *myThread = [[NSThread alloc] initWithTarget:pro selector:@selector(startCheckButton:) object:UniqueDeviceID];
+//        [myThread start];
+//        [dic setObject:pro forKey:@"ProtocolHW"];
+//        [arrayBoard replaceObjectAtIndex:i withObject:dic];
+//    }
+       
+    NSLog(@"%s arrayBoard:%@",__func__,sortedArray);
+    int numUSBBoard = (int)[arrayBoard count]; //4 or 3 => se tinh lai khi detect num usb board
+    NSLog(@"numboard:%d",numUSBBoard);
+   // numUSBBoard = 3;
+    cellSpacing = 10.0;
+    cellHSpacing = cellSpacing;
+    if(numUSBBoard == 1)
+    {
+        //1 port[8 item,4 col,2 row]
+        numRow = 2;
+        numCol = 4;
+    }
+    else if(numUSBBoard == 2)
+    {
+        //2 port[16 item,4 col,4 row]
+        numRow = 4;
+        numCol = 4;
+    }
+    else if(numUSBBoard == 3)
+    {
+        //3 port[24 item,3 col,8 row]
+        numRow = 8;
+        numCol = 3;
+        cellHSpacing = 0;
+    }
+    else if(numUSBBoard == 4)
+    {
+        //4 port[32 item,4 col,8 row]
+        numRow = 8;
+        numCol = 4;
+        cellHSpacing = 0;
+    }
+    numboard = numUSBBoard;
+
+    [self createDatabase:numUSBBoard];
+    NSLog(@"%s numRow: %d, numCol:%d",__func__,numRow,numCol);
+    
+    //arrayColumn = [[NSMutableArray alloc] init];//chua dung
+    tbHeigh = dHeight-20;
+    tableView = [[NSTableView alloc] initWithFrame:NSMakeRect(0, 0 , dWidth, tbHeigh)];
+    tableView.layer.borderColor = [NSColor blackColor].CGColor;
+    tableView.layer.borderWidth = 0.0;
+    [tableView setWantsLayer:YES];
+    [tableView setHeaderView:nil];
+    int tbWidth = dWidth - (numCol+1)*10;
+    for (int i=0;i<numCol; i++)
+    {
+        NSTableColumn *column = [[NSTableColumn alloc] initWithIdentifier:[NSString stringWithFormat:@"Col_%d",i+1]];
+        [column setTitle:[NSString stringWithFormat:@"Column %d",i+1]];
+        [column setWidth:(tbWidth-20)/numCol];
+    
+        [tableView addTableColumn:column];
+    }
+    [tableView setDelegate:self];
+    [tableView setDataSource:self];
+   // tableView.intercellSpacing = NSSizeFromCGSize(CGSizeMake(0, 9));
+    tableView.alignment = NSTextAlignmentCenter;
+    tableView.backgroundColor = [NSColor clearColor];
+    
+    [tableView setIntercellSpacing:NSMakeSize(cellSpacing, cellHSpacing)];
+#ifdef NSTableViewStylePlain
+    if( @available(macOS 11.0, *))
+    {
+        tableView.style = NSTableViewStylePlain;
+    }
+#endif
+    tableView.layer.backgroundColor = colorCFBG.CGColor;//[NSColor whiteColor].CGColor;
+   
+    NSScrollView *scrollContainer = [[NSScrollView alloc] initWithFrame:NSMakeRect(0, 0,  dWidth, dHeight-20)];
+    scrollContainer.layer.borderColor = [NSColor clearColor].CGColor;
+    [scrollContainer setWantsLayer:YES];
+    scrollContainer.layer.borderWidth = 0.0;
+    [scrollContainer setDocumentView:tableView];
+    [scrollContainer setHasVerticalScroller:NO];
+    scrollContainer.backgroundColor = colorCFBG;//[NSColor whiteColor];
+    [viewData addSubview:scrollContainer];
+    viewData.layer.backgroundColor = colorCFBG.CGColor;//[NSColor whiteColor].CGColor;
+    
+    isSelectAll = YES;
+    AppDelegate *delegate = (AppDelegate *)[[NSApplication sharedApplication] delegate];
+    checkBox = [[NSButton alloc] initWithFrame:NSMakeRect(17,viewData.frame.size.height-25, 100, 20)];
+    checkBox.image = [NSImage imageNamed:@"BoxChecked.png"];
+    checkBox.imagePosition = NSImageLeft;
+    checkBox.imageScaling = NSImageScaleProportionallyUpOrDown;
+    checkBox.title = @"  Select All";
+    checkBox.alignment = NSTextAlignmentLeft;
+    [checkBox.cell setBackgroundColor:[NSColor clearColor]];
+    NSMutableAttributedString *atribute = [delegate setColorTitleFor:checkBox color:[NSColor blackColor] size:16];
+    [checkBox setAttributedTitle:atribute];
+    checkBox.layer.borderWidth = 0.0;
+    checkBox.layer.cornerRadius = 4.0;
+    checkBox.wantsLayer = YES;
+    checkBox.bordered = NO;
+    checkBox.font = [NSFont fontWithName:@"Roboto-Regular" size:16];;
+    [checkBox setTarget:self];
+    [checkBox setAction:@selector(cbSelectAllClick:)];
+    [viewData addSubview:checkBox];
+    
+//
+//    checkBox = [[NSButton alloc] initWithFrame:NSMakeRect(1,viewData.frame.size.height-22, 100, 20)];
+//    [checkBox setButtonType:NSSwitchButton];
+//    [checkBox setAction:@selector(cbSelectAllClick:)];
+//    [checkBox setTitle:@"Select All"];
+//    checkBox.font = [NSFont fontWithName:@"Roboto-Medium" size:16];
+//    [checkBox setBezelStyle:0];
+//    [checkBox setState:1];
+//    [checkBox setWantsLayer:YES];
+//    [viewData addSubview:checkBox];
+
+}
+
+- (BOOL)control:(NSControl *)control textView:(NSTextView *)fieldEditor doCommandBySelector:(SEL)commandSelector
+{
+    NSLog(@"Selector method is (%@)", NSStringFromSelector( commandSelector ) );
+    if (commandSelector == @selector(insertNewline:)) {
+        //Do something against ENTER key
+        lbPleaseScanItemID.stringValue = txtItemID.stringValue;
+        stringVlItemIDTemp = txtItemID.stringValue;
+        lbPleaseScanItemID.textColor = NSColor.blackColor;
+        txtItemID.stringValue = @"";
+
+    } else if (commandSelector == @selector(deleteForward:)) {
+        //Do something against DELETE key
+
+    } else if (commandSelector == @selector(deleteBackward:)) {
+        //Do something against BACKSPACE key
+
+    } else if (commandSelector == @selector(insertTab:)) {
+        //Do something against TAB key
+
+    } else if (commandSelector == @selector(cancelOperation:)) {
+        //Do something against Escape key
+    }
+    return YES;
+} 
+
+-(void)btStationClick:(id)sender
+{
+    NSLog(@"%s",__func__);
+}
+- (void)btReportsClick:(id)sender
+{
+    NSLog(@"%s",__func__);
+}
+- (void)btRescanClick:(id)sender
+{
+    NSLog(@"%s",__func__);
+    NSThread *threadScan = [[NSThread alloc] initWithTarget:self selector:@selector(scanDevice) object:nil];
+    [threadScan start];
+    [self.tableView reloadData];
+}
+- (void)btStopAllClick:(id)sender
+{
+    NSLog(@"%s",__func__);
+    NSMutableDictionary *dicCell;
+    bool need_reload = NO;
+
+    for (int i=0; i<arrDatabaseCell.count; i++)
+    {
+        dicCell = [[arrDatabaseCell objectAtIndex:i] mutableCopy];
+        if(dicCell != Nil)
+        {
+            if([[dicCell objectForKey:@"status"] intValue] == CellRunning)
+            {
+                [self stopCell:dicCell];
+                need_reload = YES;
+            }
+        }
+    }
+
+    if( need_reload == YES)
+    {
+        [tableView performSelectorOnMainThread:@selector(reloadData) withObject:nil waitUntilDone:NO];
+    }
+}
+- (void)stopCell:(NSMutableDictionary *)dicCell
+{
+    NSThread *myThread = [[NSThread alloc] initWithTarget:self selector:@selector(stopErase:) object:dicCell];
+    [myThread start];
+    //NSString *note = [NSString stringWithFormat:@"<br><h3 style='color:Tomato;'> Cell Stoped</h3>"];
+    [dicCell setObject:@"" forKey:@"note"];
+    [dicCell setObject:[NSNumber numberWithInt:0] forKey:@"result"];// failed
+    [dicCell setObject:[NSNumber numberWithInt:CellFinished] forKey:@"status"];
+    NSString *title = [dicCell objectForKey:@"title"];
+    [self setLedOnBoardOfCell:title color:LED_RED_BLINK];
+    int i = [[dicCell objectForKey:@"index"] intValue];
+    [arrDatabaseCell replaceObjectAtIndex:i withObject:dicCell];
+}
+- (void)stopErase:(NSMutableDictionary *)dicCell
+{
+//    ps -e
+//    ps aux
+    // killall idevicerestore1
+    if(dicCell==nil)
+    {
+        NSLog(@"%s dicCell == nil thoat",__func__);
+        return;
+    }
+    int i = [[dicCell objectForKey:@"index"] intValue];
+    NSString *cmd = @"/usr/bin/killall";
+    NSString *param = [NSString stringWithFormat:@"idevicerestore%d",i];
+    ProccessUSB *libusbtemp = (ProccessUSB *)[dicCell objectForKey:@"ProccessUSB"];
+    bool kq = [libusbtemp actionCommand:cmd param:@[param]];
+    if(kq==NO)
+    {
+        kq = [libusbtemp actionCommand:cmd param:@[param]];
+    }
+    NSLog(@"%s killall %@ %@",__func__,param,kq?@"Passed":@"Failed");
+}
+- (void)btEraseAllClick:(id)sender
+{
+    NSLog(@"%s",__func__);
+    NSMutableDictionary *dicCell;
+    bool need_reload = NO;
+    
+    for (int i=0; i<arrDatabaseCell.count; i++)
+    {
+        dicCell = [[arrDatabaseCell objectAtIndex:i] mutableCopy];
+        if(dicCell != Nil)
+        {
+            BOOL kq = [self eraseWithItem:dicCell pos:i];
+            if(kq==YES)
+                need_reload = YES;
+        }
+    }
+    
+    if( need_reload == YES)
+    {
+        need_reload = NO;
+        [tableView performSelectorOnMainThread:@selector(reloadData) withObject:nil waitUntilDone:NO];
+    }
+}
+//pos is vi tri trong arrDatabaseCell
+- (bool) eraseWithItem:(NSMutableDictionary *)dicCell pos:(int) vt
+{
+    BOOL need_reload = NO;
+    if(dicCell != Nil)
+    {
+        NSMutableDictionary *dicInfo;
+        dicInfo = [dicCell objectForKey:@"info"];
+        if(dicInfo!=nil && [dicInfo objectForKey:@"ProductType"])
+        {
+            if(xoaManual==NO)
+            {
+                NSString *ProductType = [NSString stringWithFormat:@"%@",[dicInfo objectForKey:@"ProductType"]];
+                NSMutableDictionary *dictemp=dicInforconfig[ProductType];
+                NSString *fileRestore = @"NONE";
+                if(dictemp!=nil && dictemp[@"file_restore"]!=nil)
+                    fileRestore = dictemp[@"file_restore"];
+                if([[fileRestore uppercaseString] isEqualToString:@"NONE"] || [[fileRestore lowercaseString] hasSuffix:@".ipsw"] == NO)
+                {
+                    NSLog(@"%s chua co file restore(ipsw), file config:%@ ",__func__,fileRestore);
+                    NSString *note = [NSString stringWithFormat:@"<p style=\"font-family:'Roboto-Regular';font-size:20px;color:Tomato;\"> File restore(ipsw) not exists</p>"];
+                    [dicCell setObject:note forKey:@"note"];
+                    [dicCell setObject:[NSNumber numberWithInt:0] forKey:@"result"];// failed
+                    [dicCell setObject:[NSNumber numberWithInt:CellFinished] forKey:@"status"];
+                    NSString *title = [dicCell objectForKey:@"title"];
+                    [self setLedOnBoardOfCell:title color:LED_RED_BLINK];
+                    [arrDatabaseCell replaceObjectAtIndex:vt withObject:dicCell];
+                    need_reload = YES;
+                    return need_reload;
+                }
+                                
+                NSThread *myThread = [[NSThread alloc] initWithTarget:self selector:@selector(eraseWatch:) object:dicCell];
+                [myThread start];
+      
+                need_reload = YES;
+                [arrDatabaseCell replaceObjectAtIndex:vt withObject:dicCell];
+            }
+            else
+            { // xoa manual
+               
+                if([[dicCell objectForKey:@"status"] intValue] == CellRunning)
+                {
+                    if (![[dicCell objectForKey:@"itemID"]  isEqual: @""]) {
+                        
+                        NSMutableDictionary *dicInfo = [dicCell objectForKey:@"info"];
+                        if(dicInfo!=nil && [dicInfo objectForKey:@"ActivationState"]!=nil)
+                        {
+                            NSString *strActivationState = [NSString stringWithFormat:@"%@",[dicInfo objectForKey:@"ActivationState"]];
+                            if([strActivationState rangeOfString:@"Unactivated"].location == NSNotFound)
+                            {
+                                NSString *stringhtml = [dicCell objectForKey:@"conten"];
+                                if([stringhtml rangeOfString:@"Erase All Content and Settings"].location == NSNotFound)
+                                    stringhtml = [NSString stringWithFormat:@"<style=\"font-size:16px\">%@ <br>Please go to Settings -> General -> Reset \n -> Erase All Content and Settings -> Select erase all to erase device", [dicCell objectForKey:@"conten"]];
+                                [dicCell setObject:stringhtml forKey:@"conten"];
+                                [arrDatabaseCell replaceObjectAtIndex:vt withObject:dicCell];
+                            }
+                           
+                        }
+                        
+                        NSString *title = [dicCell objectForKey:@"title"];
+                        [self setLedOnBoardOfCell:title color:LED_YELLOW];
+                        need_reload = YES;
+                        
+                    }
+                   
+                }
+//                    [dicCell setObject:[NSNumber numberWithInt:CellChecking] forKey:@"status"];
+//                    [dicCell setObject:[NSNumber numberWithInt:1] forKey:@"result"];// passed
+            }
+            
+        }
+    }
+    return need_reload;
+}
+- (void) eraseWatch:(NSMutableDictionary *)dicCell
+{
+    //if(libusb == nil) libusb = [[ProccessUSB alloc] init];
+    NSMutableDictionary *dicInfo = [dicCell objectForKey:@"info"];
+    NSString *UniqueDeviceID = [dicCell objectForKey:@"UniqueDeviceID"];
+    NSString *ProductType = [dicInfo objectForKey:@"ProductType"];
+    NSMutableDictionary *dictemp=dicInforconfig[ProductType];
+    NSString *fileRestore = dictemp[@"file_restore"];
+    NSString *path = [NSURL fileURLWithPath:[NSHomeDirectory() stringByAppendingPathComponent:[NSString stringWithFormat:@"/Documents/IPSW/%@",fileRestore]]].path;
+    int i = [[dicCell objectForKey:@"index"] intValue];
+    //NSString *path = @"/Users/duyetle/Documents/IPSW/Watch_2_Regular_6.3_17U208_Restore.ipsw";
+    if([[NSFileManager defaultManager] fileExistsAtPath:path]==NO)// neu file khong ton tai
+    {
+        NSLog(@"file %@ khong ton tai ",path);
+        //conten = [NSString stringWithFormat:@"<p style=\"font-family:'Roboto-Regular';font-size:16px\">%@</p>",conten];
+        NSString *note = [NSString stringWithFormat:@"<p style=\"font-family:'Roboto-Regular';font-size:20px;color:Tomato;\"> File restore(ipsw) not exists</p>"];
+        [dicCell setObject:note forKey:@"note"];
+        [dicCell setObject:[NSNumber numberWithInt:0] forKey:@"result"];// failed
+        [dicCell setObject:[NSNumber numberWithInt:CellFinished] forKey:@"status"];
+        NSString *title = [dicCell objectForKey:@"title"];
+        [self setLedOnBoardOfCell:title color:LED_RED_BLINK];
+        [arrDatabaseCell replaceObjectAtIndex:i withObject:dicCell];
+        [tableView performSelectorOnMainThread:@selector(reloadData) withObject:nil waitUntilDone:NO ];
+        return;
+    }
+
+    ProccessUSB *libusbtemp = (ProccessUSB *)[dicCell objectForKey:@"ProccessUSB"];
+    bool kq = false;
+    
+    AppDelegate *delegatedir = (AppDelegate *)[[NSApplication sharedApplication] delegate];
+    NSString *pathLib = [delegatedir pathLib];
+    NSString *cmd = [NSString stringWithFormat:@"%@/idevicerestore/src/idevicerestore%d",pathLib,i];
+//NSString *cmd = [NSURL fileURLWithPath:[NSHomeDirectory() stringByAppendingPathComponent:[NSString stringWithFormat:@"/Documents/EarseWatch/Lib/idevicerestore/src/idevicerestore%d",i]]].path;
+    if([UniqueDeviceID rangeOfString:@" ECID:"].location == NSNotFound) // in normal mode
+    {
+        //idevicerestore -u 34ab381d997043cadb184d76c46a2dbb98c8c57e /Users/duyetle/Documents/IPSW/Watch_2_Regular_6.3_17U208_Restore.ipsw
+        kq = [libusbtemp actionCommand:cmd param:@[@"-u",UniqueDeviceID,path]];
+        if(kq==NO)
+        {
+            bool kq = [libusbtemp actionCommand:cmd param:@[@"-u",UniqueDeviceID,path]];
+            // xoa recovery mode
+            if(kq==NO)
+            {
+                [dicCell setObject:[NSNumber numberWithInt:0] forKey:@"result"];// failed
+            }
+            else
+            {
+                [dicCell setObject:[NSNumber numberWithInt:CellChecking] forKey:@"status"];// check read infomation
+                [dicCell setObject:[NSNumber numberWithInt:1] forKey:@"result"];// passed
+            }
+        }
+        else
+        {
+            [dicCell setObject:[NSNumber numberWithInt:CellChecking] forKey:@"status"];
+            [dicCell setObject:[NSNumber numberWithInt:1] forKey:@"result"];// passed
+        }
+    }
+    else // recovery mode
+    {
+        //            idevicerestore -i 0x000B25C924BB4326 /Users/duyetle/Documents/IPSW/Watch_2_Regular_6.3_17U208_Restore.ipsw
+        
+        NSLog(@"dicInfo: %@ ",dicInfo);
+        NSString *ECID = [NSString stringWithFormat:@"0x%@",[dicInfo objectForKey:@"ECID"]];
+        kq = [libusbtemp actionCommand:cmd param:@[@"-i",ECID,path]];
+        if(kq==NO)
+        {
+            kq = [libusbtemp actionCommand:cmd param:@[@"-i",ECID,path]];
+            // xoa recovery mode
+            if(kq==NO)
+            {
+                [dicCell setObject:[NSNumber numberWithInt:0] forKey:@"result"];// failed
+            }
+            else
+            {
+                [dicCell setObject:[NSNumber numberWithInt:CellChecking] forKey:@"status"];
+                [dicCell setObject:[NSNumber numberWithInt:1] forKey:@"result"];// passed
+            }
+        }
+        else
+        {
+            [dicCell setObject:[NSNumber numberWithInt:CellChecking] forKey:@"status"];
+            [dicCell setObject:[NSNumber numberWithInt:1] forKey:@"result"];// passed
+        }
+    }
+    
+ 
+        NSMutableDictionary *dicconfig = dicInforconfig[ProductType];
+        if(dicconfig && dicconfig[@"idevice_name"]!=nil)
+            ProductType = dicconfig[@"idevice_name"];
+        NSString *conten = [NSString stringWithFormat:@"<b>%@<br>Serial:</b> %@",ProductType,[dicInfo objectForKey:@"SerialNumber"]];
+        conten = [NSString stringWithFormat:@"<p style=\"font-family:'Roboto-Regular';font-size:16px\">%@</p>",conten];
+        [dicCell setObject:conten forKey:@"conten"];
+        [dicCell setObject:[NSNumber numberWithInt:CellFinished] forKey:@"status"];
+        NSString *title = [dicCell objectForKey:@"title"];
+        NSNumber *result = [dicCell objectForKey:@"result"];
+        if([result intValue] == 1)
+        {
+            [self setLedOnBoardOfCell:title color:LED_GREEN_BLINK];
+//        [dicCell setObject:[NSNumber numberWithInt:1] forKey:@"result"];
+        }
+        else
+        {
+            [self setLedOnBoardOfCell:title color:LED_RED_BLINK];
+        }
+        
+        i = [[dicCell objectForKey:@"index"] intValue];
+        [arrDatabaseCell replaceObjectAtIndex:i withObject:dicCell];
+        [tableView performSelectorOnMainThread:@selector(reloadData) withObject:nil waitUntilDone:NO ];
+    
+}
+
+- (void)btPrintLabeltClick:(id)sender
+{
+    NSLog(@"%s",__func__);
+        UIButton *bt = (UIButton *)sender;
+        [bt performSelector:@selector(resetImage) withObject:nil afterDelay:3];
+        
+        NSMutableArray *arrDataPrint = [NSMutableArray array];
+        for(int i=0;i<arrDatabaseCell.count;i++)
+        {
+            NSMutableDictionary *dic = (NSMutableDictionary *)arrDatabaseCell[i];
+            if([[dic objectForKey:@"status"] intValue] != 0) //== 5 CellFinished
+            {
+                [arrDataPrint addObject:dic];
+            }
+        }
+        
+        if(arrDataPrint.count>0)
+        {
+            NSMutableDictionary *dicInfo = [NSMutableDictionary dictionary];
+            [dicInfo setObject:arrDataPrint forKey:@"DataPrint"];
+            printSetting = [[PrinterSetting alloc] initWithFrame:CGRectMake(0, 0, 620, 800) data:dicInfo];
+            NSRect rect = [NSScreen mainScreen].frame;
+            [printSetting view].frame = CGRectMake((rect.size.width - 620)/2, (rect.size.height -800)/2, 620, 800);
+            [printSetting view].layer.backgroundColor = [NSColor whiteColor].CGColor;
+            [printSetting view].layer.borderWidth = 2;
+            [self.view addSubview:printSetting.view];
+        
+        }
+        else
+        {
+            NSAlert *alert = [NSAlert alertWithMessageText:@"Printer Alert" defaultButton:@"Close" alternateButton:nil otherButton:nil informativeTextWithFormat:@"Not device info to print"];
+            [alert runModal];
+        }
+
+    
+    
+//    windowshow = [NSWindow windowWithContentViewController:printSetting];
+//    [windowshow center];
+//    [windowshow setBackgroundColor:[NSColor colorWithRed:245.0/255 green:245.0/255 blue:245.0/255 alpha:1.0]];
+//    [windowshow setContentSize:NSSizeFromCGSize(CGSizeMake(620, 750))];
+//    windowshow.title = @"Printing setting";
+//    windowshow.contentViewController = printSetting;
+//    [windowshow setLevel:NSFloatingWindowLevel];
+//    [windowshow setStyleMask:NSBorderlessWindowMask];
+//    [windowshow setReleasedWhenClosed:YES];
+//
+    
+   
+    
+//    windowController = [[NSWindowController alloc] initWithWindow:windowshow];
+//    [windowController showWindow:nil];
+    
+//    NSWindow *mainWindow = [[[NSApplication sharedApplication] windows] objectAtIndex:0];
+//    [mainWindow addChildWindow:windowshow ordered:NSWindowAbove];
+}
+
+- (void)cbSelectAllClick:(id)sender
+{
+    NSButton *cb = (NSButton *)sender;
+    NSLog(@"Select all change %d",(int)cb.state);
+    if(isSelectAll)
+    {
+        isSelectAll = NO;
+        checkBox.image = [NSImage imageNamed:@"BoxUncheck.png"];
+    }
+    else
+    {
+        isSelectAll = YES;
+        checkBox.image = [NSImage imageNamed:@"BoxChecked.png"];
+    }
+    
+    for(int i=0; i<arrDatabaseCell.count; i++)
+    {
+        NSMutableDictionary *dicCell = [arrDatabaseCell objectAtIndex:i];
+        [dicCell setObject:[NSNumber numberWithInt:isSelectAll?1:0] forKey: @"CheckboxValue"];
+        [arrDatabaseCell replaceObjectAtIndex:i withObject:dicCell];
+    }
+    
+    [tableView reloadData];
+}
+- (void) buttonCellClick:(id)sender
+{
+    NSMutableDictionary *dic = (NSMutableDictionary *)sender;
+    
+    NSButton *bt =(NSButton*)[dic objectForKey:@"button"];
+    NSLog(@"%s Button stringValue:%@, tag:%ld, title:%@, state:%d \ndic:%@ ",__FUNCTION__,bt.stringValue, bt.tag, bt.title,(int)bt.state ,dic);
+
+    if( bt.tag == BT_INFO)
+    {
+        //[self performSelectorOnMainThread:@selector(showFormInfo) withObject:dic waitUntilDone:NO];
+        [self showFormInfo:dic];
+    }
+    else if( bt.tag == BT_CHECK)
+    {
+        // check box click
+        int i = [[dic objectForKey:@"index"] intValue];
+        NSMutableDictionary *dicCell = [arrDatabaseCell objectAtIndex:i];
+        [dicCell setObject:[NSNumber numberWithInt:bt.state?1:0] forKey: @"CheckboxValue"];
+        [arrDatabaseCell replaceObjectAtIndex:i withObject:dicCell];
+    }
+    else if( bt.tag == BT_STOP)
+    {
+        [self stopCell:dic];
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [self.tableView reloadData];
+        });
+    }
+    else if( bt.tag == BT_RESCAN)
+    {
+        int i = [[dic objectForKey:@"index"] intValue];
+        [self removeDevice:i];
+//        [self btRescanClick:nil];
+    }
+}
+
+
+- (void)showFormInfo:(NSMutableDictionary *)dicCell
+{
+    NSLog(@"%s dicCell:%@",__func__,dicCell);
+    NSString *title = [dicCell objectForKey:@"title"];
+    int pos = -1;
+    if([title rangeOfString:@"A"].location != NSNotFound)
+        pos = 0;
+    if([title rangeOfString:@"B"].location != NSNotFound)
+        pos = 1;
+    if([title rangeOfString:@"C"].location != NSNotFound)
+        pos = 2;
+    if([title rangeOfString:@"D"].location != NSNotFound)
+        pos = 3;
+    
+    
+    AppDelegate *delegate = (AppDelegate *)[[NSApplication sharedApplication] delegate];
+    [dicCell setObject:delegate.userName forKey:@"username"];
+    [dicCell setObject:VERSION forKey:@"software_version"];
+    if(pos != -1)
+    {
+        NSMutableDictionary *dic = [arrayBoard objectAtIndex:pos];
+        NSDictionary *hwdic = [dic objectForKey:@"VersionHW"];
+        if(hwdic.count > 0)
+        {
+        NSString *firmware = [hwdic objectForKey:@"firmware"];
+        NSString *hardware = [hwdic objectForKey:@"hardware"];
+        [dicCell setObject:hardware forKey:@"hardware_version"];
+        [dicCell setObject:firmware forKey:@"firmware_version"];
+        }
+        else
+        {
+            [dicCell setObject:@"N/A" forKey:@"hardware_version"];
+            [dicCell setObject:@"N/A" forKey:@"firmware_version"];
+        }
+        [dicCell setObject:@"colorDevice" forKey:@"color_device"];
+        [dicCell setObject:@"capacityDevice" forKey:@"capacity_device"];
+        [dicCell setObject:@"carrierDevice" forKey:@"carrier_device"];
+
+        
+
+    }
+    DeviceInfomation *info = [[DeviceInfomation alloc] initWithFrame:CGRectMake(0, 0, 700, 630) data:dicCell];
+    NSWindow *window = [NSWindow windowWithContentViewController:info];
+    [window center];
+    [window setBackgroundColor:[NSColor colorWithRed:245.0/255 green:245.0/255 blue:245.0/255 alpha:1.0]];
+    [window setContentSize:NSSizeFromCGSize(CGSizeMake(700, 630))];
+    window.title = @"Earse Watch";
+    window.contentViewController = info;
+    [window setLevel:NSNormalWindowLevel];
+    [window setStyleMask:NSBorderlessWindowMask];
+    NSWindowController *windowControllerIF = [[NSWindowController alloc] initWithWindow:window];
+    [windowControllerIF showWindow:nil];
+    
+
+}
+//- (void)showFormInfo:(NSMutableDictionary *)dicCell
+//{
+//    NSLog(@"%s dicCell:%@",__func__,dicCell);
+//    NSString *title = [dicCell objectForKey:@"title"];
+//    int pos = -1;
+//    if([title rangeOfString:@"A"].location != NSNotFound)
+//        pos = 0;
+//    if([title rangeOfString:@"B"].location != NSNotFound)
+//        pos = 1;
+//    if([title rangeOfString:@"C"].location != NSNotFound)
+//        pos = 2;
+//    if([title rangeOfString:@"D"].location != NSNotFound)
+//        pos = 3;
+//
+//
+//    AppDelegate *delegate = (AppDelegate *)[[NSApplication sharedApplication] delegate];
+//    [dicCell setObject:delegate.userName forKey:@"username"];
+//    [dicCell setObject:VERSION forKey:@"software_version"];
+//    if(pos != -1)
+//    {
+//        NSMutableDictionary *dic = [arrayBoard objectAtIndex:pos];
+//        NSDictionary *hwdic = [dic objectForKey:@"VersionHW"];
+//        if(hwdic)
+//        {
+//            NSString *firmware = [hwdic objectForKey:@"firmware"];
+//            NSString *hardware = [hwdic objectForKey:@"hardware"];
+//            [dicCell setObject:hardware forKey:@"hardware_version"];
+//            [dicCell setObject:firmware forKey:@"firmware_version"];
+//        }
+//    }
+//    DeviceInfomation *info = [[DeviceInfomation alloc] initWithFrame:CGRectMake(0, 0, 700, 630) data:dicCell];
+//    NSWindow *window = [NSWindow windowWithContentViewController:info];
+//    [window center];
+//    [window setBackgroundColor:[NSColor colorWithRed:245.0/255 green:245.0/255 blue:245.0/255 alpha:1.0]];
+//    [window setContentSize:NSSizeFromCGSize(CGSizeMake(700, 630))];
+//    window.title = @"Earse Watch";
+//    window.contentViewController = info;
+//   [window setLevel:NSNormalWindowLevel];
+//    [window setStyleMask:NSBorderlessWindowMask];
+//    NSWindowController *windowControllerIF = [[NSWindowController alloc] initWithWindow:window];
+//    [windowControllerIF showWindow:nil];
+//
+//
+//}
+// ben cell se tra ve
+- (void)updateCellData:(id)sender
+{
+//    NSMutableDictionary *dic = (NSMutableDictionary *)sender;
+//    NSLog(@"%s data:%@",__func__,dic);
+//    int index = [[dic objectForKey:@"index"] intValue];
+}
+
+#pragma mark - board hardware
+- (void)boadrBTClick:(id)sender
+{
+    
+    NSNotification *noti = (NSNotification *)sender;
+    NSLog(@"%s object:%@",__func__,noti.object);
+    if([noti.name isEqualToString:@"BoardButtonsClick"])
+    {
+        int vt = -1;
+        NSDictionary *dic = (NSDictionary *)noti.object;
+        NSMutableArray *arrbt = [[dic objectForKey:@"buttonsState"] mutableCopy];
+        
+        NSString *serial = [dic objectForKey:@"serial"];
+        
+        Byte arr[8] = {NO_CHARGE,NO_CHARGE,NO_CHARGE,NO_CHARGE,NO_CHARGE,NO_CHARGE, NO_CHARGE,NO_CHARGE};
+       
+        
+//        Byte arr[8]= {
+//
+//            [[arrbt objectAtIndex:0] intValue]==1?LED_YELLOW:NO_CHARGE,
+//            [[arrbt objectAtIndex:1] intValue]==1?LED_YELLOW:NO_CHARGE,
+//            [[arrbt objectAtIndex:2] intValue]==1?LED_YELLOW:NO_CHARGE,
+//            [[arrbt objectAtIndex:3] intValue]==1?LED_YELLOW:NO_CHARGE,
+//            [[arrbt objectAtIndex:4] intValue]==1?LED_YELLOW:NO_CHARGE,
+//            [[arrbt objectAtIndex:5] intValue]==1?LED_YELLOW:NO_CHARGE,
+//            [[arrbt objectAtIndex:6] intValue]==1?LED_YELLOW:NO_CHARGE,
+//            [[arrbt objectAtIndex:7] intValue]==1?LED_YELLOW:NO_CHARGE};
+//
+        //[protocolHW ledControl:@"A601V5L5" ledArr:arr];
+       
+        for (int i=0; i<8; i++)
+        {
+            if([[arrbt objectAtIndex:i] intValue] == 1)
+            {
+                vt = i;// vi tri bt tren board nhan duoc event nhan [0,7]
+                break;
+            }
+        }
+        
+      
+        
+        
+        protocolHW = nil;
+        BOOL need_reload = NO;
+        for (int i=0; i<arrayBoard.count; i++)
+        {
+            NSMutableDictionary *dic = [arrayBoard objectAtIndex:i];
+            NSString *strID = [dic objectForKey:@"UniqueDeviceID"];
+            if([strID isEqualToString:serial])
+            {
+                
+                
+                
+                protocolHW = [dic objectForKey:@"ProtocolHW"];
+                //bat den tren board
+               
+                
+                NSLog(@"%s click vt:%d, Board:%d,dic %@",__func__,vt,i,dic);
+                int local=vt + i*8;
+                if(local < arrDatabaseCell.count)
+                {
+                    NSMutableDictionary *dicCell = [arrDatabaseCell objectAtIndex:local];
+                    NSLog(@"%s xoa watch o vitri: %d,%@",__func__,local,dicCell);
+                    //xoa device cho nay
+                    dicCell = [arrDatabaseCell objectAtIndex:local];
+                    
+                    if([[dicCell objectForKey:@"status"] intValue] == CellFinished ||
+                       [[dicCell objectForKey:@"status"] intValue] == CellCouldNotRead)
+                    {
+                        NSLog(@"%s start reset the port ======== CellFinished",__func__);
+                        //[dicCell setObject:[NSNumber numberWithInt:CellNoDevice] forKey:@"status"];
+                        //int i = [[dic objectForKey:@"index"] intValue];
+                        [self removeDevice:local];
+                        //[self btRescanClick:nil];
+                        //[tableView performSelectorOnMainThread:@selector(reloadData) withObject:nil waitUntilDone:NO];
+                        
+                        return;
+                    }
+                    else if([[dicCell objectForKey:@"status"] intValue] == CellReady)
+                    {
+                        NSLog(@"%s start erasing for the port here ======== CellReady",__func__);
+                        
+                        [dicCell setObject:[NSNumber numberWithInt:CellRunning] forKey:@"status"];
+                        [self.tableView performSelectorOnMainThread:@selector(reloadData) withObject:nil waitUntilDone:NO ];
+                        if([stringVlItemIDTemp  isEqual: @""])
+                        {
+                            NSLog(@"%s start erasing for the port here ======== CellReady return iTem ID nill",__func__);
+                            stringVlItemIDTemp = @"";
+                            [dicCell setObject: @"" forKey:@"itemID"];
+                            arr[vt] = LED_YELLOW;
+                            if(protocolHW)
+                                [protocolHW ledControl:serial ledArr:arr];
+                            return;
+                        }
+                        else
+                        {
+                            NSLog(@"%s start erasing for the port here ======== CellReady return iTem ID assign",__func__);
+                            [dicCell setObject: stringVlItemIDTemp forKey:@"itemID"];
+                            NSString *stringTemp = [dicCell objectForKey:@"conten"];
+                            if([stringTemp rangeOfString:@"Item ID:"].location == NSNotFound)
+                            [dicCell setObject: [NSString stringWithFormat:@"%@<br><b>Item ID: </b>%@", stringTemp, [dicCell objectForKey:@"itemID"]] forKey:@"conten"];
+                            stringVlItemIDTemp = @"";
+                            if(dicCell != Nil)
+                            {
+                                need_reload = [self eraseWithItem:dicCell pos:local];
+                            }
+                            arr[vt] = LED_YELLOW;
+                            if(protocolHW)
+                                [protocolHW ledControl:serial ledArr:arr];
+                        }
+                        
+                        
+                    }
+                    else if ([[dicCell objectForKey:@"status"] intValue] == CellRunning)
+                    {
+                        if([stringVlItemIDTemp  isEqual: @""] == false)
+                        {
+                            NSLog(@"%s start erasing for the port here ======== CellRunning",__func__);
+                            NSLog(@"%s start erasing for the port here ======== CellRunning return iTem ID assign",__func__);
+                            [dicCell setObject: stringVlItemIDTemp forKey:@"itemID"];
+                            NSString *stringTemp = [dicCell objectForKey:@"conten"];
+                            if([stringTemp rangeOfString:@"Item ID:"].location == NSNotFound)
+                            [dicCell setObject: [NSString stringWithFormat:@"%@<br><b>Item ID: </b>%@", stringTemp, [dicCell objectForKey:@"itemID"]] forKey:@"conten"];
+                            stringVlItemIDTemp = @"";
+                            if(dicCell != Nil)
+                            {
+                                need_reload = [self eraseWithItem:dicCell pos:local];
+                            }
+                        }
+                    }
+                    else
+                    {
+                        NSLog(@"%s start erasing for the port here ======== else",__func__);
+                    }
+                }
+                break;
+            }
+        }
+
+        if( need_reload == YES)
+        {
+            [tableView performSelectorOnMainThread:@selector(reloadData) withObject:nil waitUntilDone:NO];
+        }
+               
+    }
+}
+
+- (void) setLedOnBoardOfCell:(NSString*)title color:(Byte)color_led
+{
+    //NSMutableDictionary *dicCell = nil;
+    NSLog(@"cell: %@",arrDatabaseCell);
+    NSLog(@"%s arrayBoard:%@",__func__,arrayBoard);
+    NSLog(@"vitri: %@",title);
+
+    int pos = -1;
+    if([title rangeOfString:@"A"].location != NSNotFound)
+    {
+        pos = 0;
+        title = [title stringByReplacingOccurrencesOfString:@"A" withString:@""];
+    }
+    else if([title rangeOfString:@"B"].location != NSNotFound)
+    {
+        pos = 1;
+        title = [title stringByReplacingOccurrencesOfString:@"B" withString:@""];
+    }
+    else if([title rangeOfString:@"C"].location != NSNotFound)
+    {
+        pos = 2;
+        title = [title stringByReplacingOccurrencesOfString:@"C" withString:@""];
+    }
+    else if([title rangeOfString:@"D"].location != NSNotFound)
+    {
+        pos = 3;
+        title = [title stringByReplacingOccurrencesOfString:@"D" withString:@""];
+    }
+    else return;
+    
+    int vt = [title intValue]-1;
+    NSMutableDictionary *dic = [arrayBoard objectAtIndex:pos];
+    NSString *serial = [dic objectForKey:@"UniqueDeviceID"];
+    Byte arr[8] = {NO_CHARGE,NO_CHARGE,NO_CHARGE,NO_CHARGE,NO_CHARGE,NO_CHARGE, NO_CHARGE,NO_CHARGE};
+    arr[vt] = color_led;
+   
+    //[protocolHW ledControl:@"A601V5L5" ledArr:arr];
+    //protocolHW = nil;
+    NSMutableDictionary *dicb = [arrayBoard objectAtIndex:pos];
+    protocolHW = [dicb objectForKey:@"ProtocolHW"];
+    if(protocolHW)
+    {
+        [protocolHW ledControl:serial ledArr:arr];
+        usleep(200000);
+        
+        //sleep(1);
+    }
+    
+}
+#pragma mark - TableView delegate
+
+- (NSInteger)numberOfRowsInTableView:(NSTableView *)tableView {
+    return numRow;
+}
+
+- (CGFloat)tableView:(NSTableView *)tableView heightOfRow:(NSInteger)row
+{
+   
+    // int hRight = (rect.size.height- (rect.size.height/26+rect.size.height/13))-160;
+    int hRight = tbHeigh - (numRow+1)*cellHSpacing;
+//    if(numRow<8)
+//        hRight = tbHeigh - (numRow+1)*10;
+
+    if(hRight <= 0)
+    {
+        CGRect rect = tableView.frame;
+        rect = [NSScreen mainScreen].frame;
+        hRight = rect.size.height-150;
+    }
+    
+    return hRight/(numRow);
+}
+
+- (void)tableView:(NSTableView *)tableView willDisplayCell:(id)cell forTableColumn:(nullable NSTableColumn *)tableColumn row:(NSInteger)row;
+{
+    NSLog(@"willDisplayCell tableColumn:%@, row: %d",tableColumn.identifier,(int)row);
+}
+- (nullable id)tableView:(NSTableView *)tableView objectValueForTableColumn:(nullable NSTableColumn *)tableColumn row:(NSInteger)row
+{
+    int col = [[[tableColumn identifier] stringByReplacingOccurrencesOfString:@"Col_" withString:@""] intValue];
+    NSMutableDictionary *dic = arrDatabaseCell[(col-1)*numRow+row];
+
+    return dic;
+}
+- (void)tableView:(NSTableView *)tableView didAddRowView:(NSTableRowView *)rowView forRow:(NSInteger)row
+{
+    NSLog(@"%s row:%ld",__func__,row);
+}
+
+-(NSView *)tableView:(NSTableView *)tableView viewForTableColumn:(NSTableColumn *)tableColumn  row:(NSInteger)row {
+    NSLog(@"%s colume:%@, row:%ld",__func__,tableColumn.identifier,row);
+    [tableView setSelectionHighlightStyle:NSTableViewSelectionHighlightStyleNone]; // clear color blue select row
+    [tableView setFocusRingType:NSFocusRingTypeNone];
+
+    //NSString *vitri = [NSString stringWithFormat:@"%@_%d",[tableColumn identifier],(int)row];
+    int col = [[[tableColumn identifier] stringByReplacingOccurrencesOfString:@"Col_" withString:@""] intValue];
+    
+    
+    long vt = (col-1)*numRow+row;
+    
+    NSMutableDictionary *dic = arrDatabaseCell[vt];// thang tu tren xuong => theo dang cot doc
+    if(numboard == 1) dic = arrDatabaseCell[row*numCol+(col-1)];// ngan tu trai qua => theo dang nam ngan
+    
+    [dic setObject:[NSNumber numberWithInt:numboard] forKey:@"num_board"];
+    int hRight = tbHeigh - (numRow+1)*cellHSpacing;
+    
+    
+    CellTableClass *cellView=[[CellTableClass alloc] initWithFrame:NSMakeRect(0, 0, (tableView.frame.size.width-10*(numCol+1))/numCol, hRight/numRow) info:dic];
+    
+    //CellTableClass *cellView = (CellTableClass*)[tableView viewAtColumn:col row:row makeIfNecessary:YES];
+    //CellTableClass *cellView = [tableView makeViewWithIdentifier:[tableColumn identifier] owner:nil];
+    cellView.identifier = [tableColumn identifier];
+    [cellView setDelegate:self method:@selector(buttonCellClick:)];
+    // show image result
+    [cellView updateState:[[dic objectForKey:@"status"] intValue]];
+    
+    //NSString *stringhtml = [NSString stringWithFormat:@"<span style=\"font-size:16px;font-family:'Roboto-Regular'\">%@</span>",[dic objectForKey:@"conten"]];
+    NSString *stringhtml = [NSString stringWithFormat:@"<p style=\"font-size:16px\">%@</p>", [dic objectForKey:@"conten"]];
+
+    NSLog(@"%s %@ cell_status:%d",__func__,[dic objectForKey:@"title"],[[dic objectForKey:@"status"] intValue]);
+
+    if([[dic objectForKey:@"status"] intValue] == CellFinished)
+    {
+        NSString *conten = [NSString stringWithFormat:@"%@", [dic objectForKey:@"conten"]];
+        if([conten rangeOfString:@"Please go to Settings -> General -> Reset"].location != NSNotFound)
+        {
+            conten = [conten stringByReplacingOccurrencesOfString:@"<br>Please go to Settings -> General -> Reset \n -> Erase All Content and Settings -> Select erase all to erase device" withString:@""];
+            [dic setObject:conten forKey:@"conten"];
+            long vt = (col-1)*numRow+row;
+            if(numboard == 1) vt = row*numCol+(col - 1);// ngan tu trai qua => theo dang nam ngan
+            [arrDatabaseCell replaceObjectAtIndex:vt withObject:dic];
+        }
+        
+        if([[dic objectForKey:@"result"] intValue] == 1) {
+           
+            if([[dic objectForKey:@"conten"] containsString:@"Please go to Settings"])
+            {
+                conten = [dic objectForKey:@"conten"];
+                conten = [conten stringByReplacingOccurrencesOfString:@"<br>Please go to Settings -> General -> Reset \n -> Erase All Content and Settings -> Select erase all to erase device" withString:@""];
+                [dic setObject:conten forKey:@"conten"];
+                long vt = (col-1)*numRow+row;
+                if(numboard == 1) vt = row*numCol+(col-1);// ngan tu trai qua => theo dang nam ngan
+                [arrDatabaseCell replaceObjectAtIndex:vt withObject:dic];
+            }
+            else
+            {
+                NSString *str = [dic objectForKey:@"conten"];
+                if([str rangeOfString:@"Item ID:"].location == NSNotFound)
+                stringhtml = [NSString stringWithFormat:@"<p style=\"font-size:16px\">%@ <br><b>Item ID: </b> %@ </br></p>", [dic objectForKey:@"conten"], [dic objectForKey:@"itemID"]];
+            }
+            
+            
+            
+            [self setLedOnBoardOfCell:[dic objectForKey:@"title"] color:LED_GREEN_BLINK];
+            cellView.imgResult.image = [NSImage imageNamed:@"passed_with_text"];
+        }
+        else
+        {
+            [self setLedOnBoardOfCell:[dic objectForKey:@"title"] color:LED_RED_BLINK];
+            cellView.imgResult.image = [NSImage imageNamed:@"failed_with_text"];
+            stringhtml = [NSString stringWithFormat:@"<p style=\"font-size:16px\">%@<br></p>",[dic objectForKey:@"conten"]];
+        }
+        
+        
+//        if ([dicInfo objectForKey:@"InternationalMobileEquipmentIdentity"] == nil) {
+//            conten = [NSString stringWithFormat:@"<b>%@<br>IMEI:</b> %@<br><b>Serial:</b> %@<br><b>Firmware:</b> %@<br><b>Internal name:</b> %@",
+//                      name,
+//                      @"N/A",
+//                      [dicInfo objectForKey:@"SerialNumber"],
+//                      [dicInfo objectForKey:@"ProductVersion"],
+//                      [dicInfo objectForKey:@"ProductType"]
+//            ];
+//        } else {
+//            conten = [NSString stringWithFormat:@"<b>%@<br>IMEI:</b> %@<br><b>Serial:</b> %@<br><b>Firmware:</b> %@<br><b>Internal name:</b> %@",
+//                      name,
+//                      [dicInfo objectForKey:@"InternationalMobileEquipmentIdentity"],
+//                      [dicInfo objectForKey:@"SerialNumber"],
+//                      [dicInfo objectForKey:@"ProductVersion"],
+//                      [dicInfo objectForKey:@"ProductType"]
+//            ];
+//        }
+//        
+        
+
+    }
+    if([[dic objectForKey:@"status"] intValue] == CellRunning)
+    {
+        if([[dic objectForKey:@"itemID"] isEqual:@""] || [dic objectForKey:@"itemID"] == nil) {
+            stringhtml = [NSString stringWithFormat:@"<p style=\"font-size:16px\">%@ <p style=\"font-size:16px; color:red\" <br><b>Please enter item ID and press button again.</b></br></p></p>", [dic objectForKey:@"conten"]];
+        }
+    }
+//    NSString *title = [dic objectForKey:@"title"];
+//    if([title isEqualToString:@"A1"]==YES)
+//        NSLog(@"%@",dic);
+//
+    NSData *data = [stringhtml dataUsingEncoding:NSUTF8StringEncoding];
+    NSAttributedString *attributedString = [[NSAttributedString alloc] initWithHTML:data baseURL:nil documentAttributes:nil];
+    [[cellView.tvInfoDevice textStorage] setAttributedString:attributedString];
+    cellView.tvInfoDevice.font = [NSFont fontWithName:@"Roboto-Regular" size:22];
+
+    return cellView;// [arrCell objectAtIndex:(col-1)*numRow+row];
+}
+
+
+- (void)tableViewSelectionDidChange:(NSNotification *)notification {
+    NSLog(@"%s",__FUNCTION__);
+    NSTableView *tableView = notification.object;
+    NSLog(@"User has selected row %ld", (long)tableView.selectedRow);
+    
+    
+//    NSInteger selected = [tableView selectedRow];
+//    NSTableCellView *selectedRow = [tableView viewAtColumn:0 row:selected makeIfNecessary:YES];
+
+    
+}
+
+
+
+
+@end
